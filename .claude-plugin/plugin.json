@@ -1,0 +1,96 @@
+{
+  "name": "code-viewer",
+  "version": "0.0.1",
+  "description": "Code Viewer for Claude Code: open the files and diffs of your session in a side pane, with tabs, fuzzy search and themeable syntax highlighting.",
+  "license": "MIT",
+  "keywords": ["pane", "syntax-highlighting", "diff", "viewer"],
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "theme": {
+      "type": "string",
+      "title": "Theme",
+      "description": "The color theme of the code pane.",
+      "default": "one-dark",
+      "options": ["one-dark"]
+    },
+    "highlighter": {
+      "type": "string",
+      "title": "Highlighter",
+      "description": "theme: the mod's own themeable highlighter where it knows the language, Claude Code's elsewhere. engine: always Claude Code's (its colors are fixed).",
+      "default": "theme",
+      "options": ["theme", "engine"]
+    },
+    "wrapLines": {
+      "type": "boolean",
+      "title": "Wrap long lines",
+      "description": "Wrap lines wider than the pane instead of cutting them.",
+      "default": true
+    },
+    "keywordColor": {
+      "type": "string",
+      "title": "Keyword color",
+      "description": "Overrides the theme: a hex color (#c678dd) or a color name. Empty keeps the theme's.",
+      "default": ""
+    },
+    "stringColor": {
+      "type": "string",
+      "title": "String color",
+      "description": "Overrides the theme. Empty keeps the theme's.",
+      "default": ""
+    },
+    "commentColor": {
+      "type": "string",
+      "title": "Comment color",
+      "description": "Overrides the theme. Empty keeps the theme's.",
+      "default": ""
+    },
+    "numberColor": {
+      "type": "string",
+      "title": "Number and constant color",
+      "description": "Overrides the theme. Empty keeps the theme's.",
+      "default": ""
+    },
+    "functionColor": {
+      "type": "string",
+      "title": "Function color",
+      "description": "Overrides the theme. Empty keeps the theme's.",
+      "default": ""
+    },
+    "typeColor": {
+      "type": "string",
+      "title": "Type color",
+      "description": "Overrides the theme. Empty keeps the theme's.",
+      "default": ""
+    },
+    "propertyColor": {
+      "type": "string",
+      "title": "Property and key color",
+      "description": "Overrides the theme. Empty keeps the theme's.",
+      "default": ""
+    },
+    "lineNumberColor": {
+      "type": "string",
+      "title": "Line number color",
+      "description": "Overrides the theme. Empty keeps the theme's.",
+      "default": ""
+    },
+    "backgroundColor": {
+      "type": "string",
+      "title": "Pane background",
+      "description": "A color painted under the pane. Empty keeps the terminal's own background.",
+      "default": ""
+    },
+    "diffAddedColor": {
+      "type": "string",
+      "title": "Added line background",
+      "description": "Overrides the theme. Empty follows your Claude Code theme.",
+      "default": ""
+    },
+    "diffRemovedColor": {
+      "type": "string",
+      "title": "Removed line background",
+      "description": "Overrides the theme. Empty follows your Claude Code theme.",
+      "default": ""
+    }
+  }
+}

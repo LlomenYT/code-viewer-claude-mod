@@ -1,0 +1,5 @@
+{
+  "name": "code-viewer-claude-mod",
+  "owner": { "name": "LlomenYT" },
+  "plugins": [{ "name": "code-viewer", "source": "./" }]
+}
