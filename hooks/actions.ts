@@ -4,26 +4,33 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface } from 'claude-code'
 
-import type { Hunk, Tab, Touched, View } from '../types'
+import type { Change, Hunk, Tab, Touched, View } from '../types'
 import {
   absolute,
   ancestors,
   basename,
+  branchesNamed,
   clean,
+  countHunks,
   dirname,
   fitHunks,
+  insideWorktree,
   isAbsolute,
   isCode,
   mentionsOf,
+  pageHunks,
+  parseChanges,
   parsePatch,
+  preferredBranch,
   rank,
   shortOf,
   relative,
   splitLines,
   splitLocation,
+  WRAPPED_LINE,
 } from './files'
 import type { Settings } from './themes'
-import { languageOf, stateAfter } from './tokenize'
+import { languageOf, stateAfter, tokenizeLine } from './tokenize'
 
 export const PANE = 'code-viewer'
 /** Lines of a file drawn at once; the pane's buttons turn the page. */
@@ -50,7 +57,11 @@ const INDEX_MS = 20_000
 const INDEX_FILES = 40_000
 /** Branches offered as the base of a git diff, and the lines kept around each change. */
 const BASES = 40
-const DIFF_CONTEXT = 2
+/** Bases whose distance from the current branch is counted, one git call each. */
+const COUNTED_BASES = 20
+const DIFF_CONTEXT = 3
+/** Files drawn in the `changes` list; the rest are counted. */
+export const CHANGES = 300
 const USUAL_BASES = [
   'origin/dev',
   'origin/develop',
@@ -68,14 +79,15 @@ const SKIPPED_DIRS = new Set(['node_modules', 'dist', 'build', 'target', 'vendor
 export const EMPTY: View = { mode: 'empty', cwd: '' }
 // Bump a shape tag when its type changes: stored values of the old shape are dropped.
 // register.tsx declares the same atoms, because the validator scans each file on its own.
-const view = atom({ plugin: 'code-viewer', key: 'view' } as const, EMPTY, { shape: 'view-1' })
+const view = atom({ plugin: 'code-viewer', key: 'view' } as const, EMPTY, { shape: 'view-2' })
 
-const tabs = atom({ plugin: 'code-viewer', key: 'tabs' } as const, [] as Tab[], { shape: 'tabs-1' })
+const tabs = atom({ plugin: 'code-viewer', key: 'tabs' } as const, [] as Tab[], { shape: 'tabs-2' })
 const touched = atom({ plugin: 'code-viewer', key: 'touched' } as const, [] as Touched[], { shape: 'touched-2' })
 const roots = atom({ plugin: 'code-viewer', key: 'roots' } as const, [] as string[], { shape: 'roots-1' })
 const diffBase = atom({ plugin: 'code-viewer', key: 'base' } as const, '')
 const suggestions = atom({ plugin: 'code-viewer', key: 'suggestions' } as const, [] as string[])
 const searchText = atom({ plugin: 'code-viewer', key: 'query' } as const, '')
+const promptTurn = atom({ plugin: 'code-viewer', key: 'turn' } as const, 0)
 
 type Engine = EngineInterface
 
@@ -101,6 +113,28 @@ export function firstChange(hunks: readonly Hunk[]): number | undefined {
 }
 
 async function listFiles($: Engine, cwd: string): Promise<string[]> {
+  const lines = (text: string) => text.split('\n').filter(line => line !== '')
+
+  try {
+    // The tracked files, the submodules' included; git takes no untracked ones with them, so those come apart.
+    const tracked = await $.process.run(['git', '-c', 'core.quotePath=false', 'ls-files', '--cached', '--recurse-submodules'], {
+      cwd,
+    })
+
+    if (tracked.exitCode === 0) {
+      const untracked = await $.process
+        .run(['git', '-c', 'core.quotePath=false', 'ls-files', '--others', '--exclude-standard'], { cwd })
+        .catch(() => undefined)
+      const files = [...lines(tracked.stdout), ...(untracked?.exitCode === 0 ? lines(untracked.stdout) : [])]
+
+      if (files.length > 0) {
+        return [...new Set(files)]
+      }
+    }
+  } catch {
+    // An older git, or none: the plain listing below.
+  }
+
   try {
     const result = await $.process.run(
       ['git', '-c', 'core.quotePath=false', 'ls-files', '--cached', '--others', '--exclude-standard'],
@@ -108,7 +142,7 @@ async function listFiles($: Engine, cwd: string): Promise<string[]> {
     )
 
     if (result.exitCode === 0 && result.stdout.trim() !== '') {
-      return result.stdout.split('\n').filter(line => line !== '')
+      return lines(result.stdout)
     }
   } catch {
     // No git here: walk the folders instead.
@@ -161,33 +195,110 @@ async function place(
   })
 }
 
-export async function show($: Engine, settings: Settings, next: View, title: string): Promise<void> {
+// Where the pane's body is scrolled to, as the person's last move left it (register.tsx's
+// `ui.scroll` hook), how many rows the drawing puts above a file's first line (its estimate, as
+// the pane draws), and the offset a tab shown again goes back to. The module's own, gone at a reload.
+let paneOffset = 0
+let headerRows = 0
+let restoreOffset: number | undefined
+
+/** Remembers where the body was scrolled to. */
+export function scrolled(offset: number): void {
+  paneOffset = offset
+}
+
+/** Remembers how many rows the pane draws above a file's first line. */
+export function headerHeight(rows: number): void {
+  headerRows = rows
+}
+
+/** How a view shows its file, as a tab keeps it; nothing for a view that shows neither. */
+function modeOf(next: View): Tab['mode'] {
+  return next.mode === 'file' ? 'file' : next.mode === 'diff' ? (next.diffKind === 'git' ? 'git' : 'claude') : undefined
+}
+
+/** Shows `next` and opens the pane; the file in it becomes a tab unless `keepsTab` is false (a file that cannot be read). */
+export async function show(
+  $: Engine,
+  settings: Settings,
+  next: View,
+  title: string,
+  wantsKeyboard?: boolean,
+  keepsTab = true,
+): Promise<void> {
   const { path } = next
+  const restore = restoreOffset
+
+  restoreOffset = undefined
 
   if (next.claudeHunks !== undefined) {
     next = { ...next, claudeHunks: fitHunks(next.claudeHunks, KEPT_DIFF_LINES).hunks }
   }
 
-  if (path !== undefined) {
-    // The file in view is a tab: a new one goes last, the oldest leaving past nine.
-    const tab: Tab = {
-      path,
-      ...(next.firstLine === undefined ? {} : { first: next.firstLine }),
-      ...(next.focusLine === undefined ? {} : { line: next.focusLine }),
-      ...(next.claudeHunks === undefined ? {} : { claudeHunks: next.claudeHunks }),
-    }
+  // The tab left keeps where it was scrolled to; the one shown, how it is shown.
+  const shown = await read($, view)
+  const leaving = shown.path !== undefined && shown.path !== path ? shown.path : undefined
+  const leftAt = paneOffset
+  const addsTab = path !== undefined && keepsTab
+  let dropped: string | undefined
 
-    await update($, tabs, open =>
-      open.some(openTab => openTab.path === path)
-        ? open.map(openTab => (openTab.path === path ? { ...openTab, ...tab } : openTab))
-        : [...open, tab].slice(-TABS),
-    )
+  if (addsTab || leaving !== undefined) {
+    const mode = modeOf(next)
+
+    await update($, tabs, open => {
+      const kept = leaving === undefined ? open : open.map(openTab => (openTab.path === leaving ? { ...openTab, scroll: leftAt } : openTab))
+
+      dropped = undefined
+
+      if (!addsTab || path === undefined) {
+        return kept
+      }
+
+      // The file in view is a tab: a new one goes last, the oldest leaving past nine.
+      const tab: Tab = {
+        path,
+        ...(next.firstLine === undefined ? {} : { first: next.firstLine }),
+        ...(next.focusLine === undefined ? {} : { line: next.focusLine }),
+        ...(next.claudeHunks === undefined ? {} : { claudeHunks: next.claudeHunks }),
+        ...(mode === undefined ? {} : { mode }),
+      }
+
+      if (kept.some(openTab => openTab.path === path)) {
+        return kept.map(openTab => (openTab.path === path ? { ...openTab, ...tab } : openTab))
+      }
+
+      dropped = kept.length >= TABS ? kept[0]?.path : undefined
+
+      return [...kept, tab].slice(-TABS)
+    })
+  }
+
+  if (dropped !== undefined) {
+    const said = `Tab ${basename(dropped)} closed: ${TABS} stay open.`
+
+    next = { ...next, message: next.message === undefined ? said : `${next.message} ${said}` }
   }
 
   await update($, view, () => ({ ...next, isCollapsed: false }))
-  await place($, settings, title, false)
-  // A new body starts at its top, wherever the last one was scrolled to.
+  await place($, settings, title, false, wantsKeyboard)
+  // A new body starts at its top, wherever the last one was scrolled to; a tab shown again where it was left.
+  paneOffset = 0
   await $.ui.scroll({ in: PANE, to: 'start' }).catch(() => undefined)
+
+  // A file tab shown again goes back near where it was scrolled to: the module cannot move the
+  // body to a row (its own moves skip its hooks), so it brings the line that stood at the top
+  // there, as the rows above the first line are reckoned (a wrapped line counts as one).
+  const first = next.firstLine ?? 1
+  const shownLines = next.lines?.length ?? 0
+
+  const above = headerRows + (next.message === undefined ? 0 : 1) + (first > 1 ? 1 : 0)
+
+  if (restore !== undefined && next.mode === 'file' && shownLines > 0 && restore > above) {
+    const top = Math.min(first + shownLines - 1, first + restore - above)
+
+    paneOffset = restore
+    await $.ui.scroll({ in: PANE, to: { key: `line-${top}` }, block: 'start' }).catch(() => undefined)
+  }
 }
 
 /** Minimizes the pane to its header line, or brings it back. */
@@ -215,6 +326,11 @@ export async function showList($: Engine, settings: Settings): Promise<void> {
   return show($, settings, { mode: 'empty', cwd: await $.session.cwd() }, 'Code')
 }
 
+/** A line said in the pane, over what it shows: a key that has nothing to do here says why. */
+export async function say($: Engine, message: string): Promise<void> {
+  await update($, view, value => ({ ...value, message }))
+}
+
 /** Opens the pane where it was left, or closes it: the band's button and `/code-viewer`. */
 export async function toggle($: Engine, settings: Settings): Promise<boolean> {
   const isOpen = (await $.ui.panes()).some(pane => pane.id === PANE)
@@ -238,12 +354,22 @@ export async function toggle($: Engine, settings: Settings): Promise<boolean> {
   return true
 }
 
-/** Goes back to a tab, at the page it was left on. */
+/** Goes back to a tab as it was left: the file, Claude's diff or the git diff, at its page and scroll. */
 export async function showTab($: Engine, settings: Settings, path: string): Promise<void> {
   const tab = (await read($, tabs)).find(openTab => openTab.path === path)
 
   if (tab === undefined) {
     return showFile($, settings, path)
+  }
+
+  restoreOffset = tab.scroll
+
+  if (tab.mode === 'git') {
+    return showGitDiff($, settings, path)
+  }
+
+  if (tab.mode === 'claude' && tab.claudeHunks !== undefined) {
+    return showDiff($, settings, path, 'claude', tab.claudeHunks)
   }
 
   const cwd = await $.session.cwd()
@@ -260,11 +386,13 @@ export async function showTab($: Engine, settings: Settings, path: string): Prom
   )
 }
 
-/** Closes a tab, the one in view unless another is named; then the one before it shows, or the session's files. */
+/** Closes a tab, the one in view unless another is named; then the one before it shows (else the one after), or the session's files. */
 export async function closeTab($: Engine, settings: Settings, target?: string): Promise<void> {
   const { path } = await read($, view)
   const closed = target ?? path
-  const left = (await read($, tabs)).filter(openTab => openTab.path !== closed)
+  const open = await read($, tabs)
+  const index = open.findIndex(openTab => openTab.path === closed)
+  const left = open.filter(openTab => openTab.path !== closed)
 
   await update($, tabs, () => left)
 
@@ -273,14 +401,33 @@ export async function closeTab($: Engine, settings: Settings, target?: string): 
     return
   }
 
-  const previous = left[left.length - 1]
+  const neighbour = index < 0 ? left[left.length - 1] : (open[index - 1] ?? open[index + 1])
 
-  return previous === undefined ? showList($, settings) : showTab($, settings, previous.path)
+  return neighbour === undefined ? showList($, settings) : showTab($, settings, neighbour.path)
 }
 
 const STRENGTH = { named: 0, read: 1, edited: 2 } as const
 
-/** Remembers a file Claude read, changed or named: the latest first. */
+/** Counts a prompt the person sent: the files touched from here on are the latest prompt's. */
+export async function startTurn($: Engine): Promise<void> {
+  await update($, promptTurn, count => count + 1)
+}
+
+/** Forgets the session's files: the list's "clear". */
+export async function clearList($: Engine): Promise<void> {
+  await update($, touched, () => [])
+}
+
+/** Empties the search field and what it found. */
+export async function clearSearch($: Engine): Promise<void> {
+  await update($, searchText, () => '')
+  await update($, suggestions, () => [])
+}
+
+/**
+ * Remembers a file Claude read, changed or named: the latest first. A file read or changed
+ * again goes back to the top; one only named again stays where it is.
+ */
 export async function note($: Engine, file: string, how: Touched['how'], hunks?: readonly Hunk[]): Promise<void> {
   const path = absolute(await $.session.cwd(), file)
 
@@ -293,21 +440,32 @@ export async function note($: Engine, file: string, how: Touched['how'], hunks?:
     await noteRoot($, dirname(path))
   }
 
+  const turn = await read($, promptTurn)
+
   await update($, touched, files => {
     const previous = files.find(entry => entry.path === path)
     const kept = hunks !== undefined && hunks.length > 0 ? fitHunks(hunks, TOUCHED_DIFF_LINES).hunks : previous?.hunks
+
+    if (how === 'named' && previous !== undefined) {
+      return files
+    }
 
     return [
       {
         path,
         how: previous !== undefined && STRENGTH[previous.how] > STRENGTH[how] ? previous.how : how,
         ...(kept === undefined ? {} : { hunks: kept }),
+        turn,
       },
       ...files.filter(entry => entry.path !== path),
     ]
       .slice(0, TOUCHED)
       // Only the latest keep their change: the rest open as the file alone.
-      .map((entry, index) => (index < TOUCHED_WITH_DIFF || entry.hunks === undefined ? entry : { path: entry.path, how: entry.how }))
+      .map((entry, index) =>
+        index < TOUCHED_WITH_DIFF || entry.hunks === undefined
+          ? entry
+          : { path: entry.path, how: entry.how, ...(entry.turn === undefined ? {} : { turn: entry.turn }) },
+      )
   })
 }
 
@@ -322,7 +480,7 @@ let listing: { key: string; listedAt: number; files: Map<string, string> } | und
 export async function noteRoot($: Engine, folder: string): Promise<void> {
   const dir = folder.replace(/\/+$/, '')
 
-  if (!isAbsolute(dir) || /(^|\/)\.claude(\/|$)/.test(dir) || rootOf.has(dir)) {
+  if (!isAbsolute(dir) || /(^|\/)\.claude(\/|$)/.test(insideWorktree(dir)) || rootOf.has(dir)) {
     return
   }
 
@@ -390,10 +548,11 @@ async function matchesOf($: Engine, wanted: string, limit: number): Promise<stri
   const knownRoots = await read($, roots)
   const session = new Map((await read($, touched)).map(entry => [shortOf(entry.path, cwd, knownRoots), entry.path]))
   const index = await indexOf($)
-  const found = [
-    ...rank([...session.keys()], wanted, limit).map(name => session.get(name)),
-    ...rank([...index.keys()], wanted, limit).map(name => index.get(name)),
-  ].filter((path): path is string => path !== undefined)
+  const names = [...new Set([...session.keys(), ...index.keys()])]
+  // The best match wins wherever it lies; of matches as good, the session's first.
+  const found = rank(names, wanted, limit, new Set(session.keys()))
+    .map(name => session.get(name) ?? index.get(name))
+    .filter((path): path is string => path !== undefined)
 
   return [...new Set(found)].slice(0, limit)
 }
@@ -501,7 +660,8 @@ export async function pageOf(
   const language = settings.isEngineOnly ? undefined : languageOf(path)
 
   return {
-    lines: all.slice(start - 1, start - 1 + PAGE).map(clean),
+    // Wrapped, a line is drawn whole up to a far bound; cut, as wide as the old bound.
+    lines: all.slice(start - 1, start - 1 + PAGE).map(line => clean(line, settings.isWrapping ? WRAPPED_LINE : undefined)),
     firstLine: start,
     totalLines: all.length,
     lexState: language === undefined ? '' : stateAfter(language, all.slice(0, start - 1)),
@@ -516,7 +676,8 @@ export async function showFile($: Engine, settings: Settings, file: string, line
   const base = { cwd, path, ...claudeChange }
 
   if (typeof page === 'string') {
-    return show($, settings, { ...base, mode: 'empty', message: page }, basename(path))
+    // What cannot be read is said, and does not become a tab.
+    return show($, settings, { ...base, mode: 'empty', message: page }, basename(path), undefined, false)
   }
 
   const focus = line === undefined ? {} : { focusLine: Math.min(line, page.totalLines ?? line) }
@@ -547,6 +708,8 @@ export async function showDiff($: Engine, settings: Settings, file: string, kind
   const kept = kind === 'claude' ? { claudeHunks: hunks } : await carried($, path)
   const fitted = fitHunks(hunks, DIFF_LINES)
 
+  fitted.hunks = await seeded($, settings, path, fitted.hunks)
+
   return show(
     $,
     settings,
@@ -555,11 +718,16 @@ export async function showDiff($: Engine, settings: Settings, file: string, kind
   )
 }
 
-async function git($: Engine, cwd: string, args: readonly string[]): Promise<{ output: string; error?: string }> {
+async function git(
+  $: Engine,
+  cwd: string,
+  args: readonly string[],
+  allowed: readonly number[] = [0],
+): Promise<{ output: string; error?: string }> {
   try {
     const result = await $.process.run(['git', ...args], { cwd })
 
-    return result.exitCode === 0
+    return allowed.includes(result.exitCode ?? -1)
       ? { output: result.stdout }
       : { output: '', error: clean(result.stderr.split('\n')[0] ?? '').slice(0, 200) || 'git failed' }
   } catch {
@@ -567,27 +735,67 @@ async function git($: Engine, cwd: string, args: readonly string[]): Promise<{ o
   }
 }
 
-/** The branches of the file's repository, the usual bases first, then the latest committed to. */
-async function branchesOf($: Engine, folder: string): Promise<string[]> {
-  const listed = await git($, folder, [
+/** Every branch of the file's repository, the latest committed to first. */
+async function allBranches($: Engine, folder: string): Promise<string[]> {
+  const listed = await git($, await existingFolder($, folder), [
     'for-each-ref',
     '--sort=-committerdate',
     '--format=%(refname:short)',
     'refs/heads',
     'refs/remotes',
   ])
-  const all = listed.output.split('\n').filter(name => name !== '' && !name.endsWith('/HEAD') && name !== 'origin')
 
-  return [...USUAL_BASES.filter(name => all.includes(name)), ...all.filter(name => !USUAL_BASES.includes(name))].slice(
+  return listed.output.split('\n').filter(name => name !== '' && !name.endsWith('/HEAD') && name !== 'origin')
+}
+
+/** The branches offered as a base: the usual first, then the latest committed to, never the one checked out. */
+async function branchesOf($: Engine, folder: string): Promise<string[]> {
+  const all = await allBranches($, folder)
+  const current = (await git($, folder, ['rev-parse', '--abbrev-ref', 'HEAD'])).output.trim()
+  const offered = all.filter(name => name !== current)
+
+  return [...USUAL_BASES.filter(name => offered.includes(name)), ...offered.filter(name => !USUAL_BASES.includes(name))].slice(
     0,
     BASES,
   )
 }
 
-/** Asks which branch the git diff compares with: the pane lists them over a field for any other. */
-export async function askBase($: Engine, settings: Settings, file: string, message?: string): Promise<void> {
+/** How far the current branch is ahead of each base, and behind it: the first few only. */
+async function countsOf($: Engine, folder: string, bases: readonly string[]): Promise<Record<string, [number, number]>> {
+  const counts: Record<string, [number, number]> = {}
+  const counted = await Promise.all(
+    bases
+      .slice(0, COUNTED_BASES)
+      .map(async base => [base, await git($, folder, ['rev-list', '--left-right', '--count', `HEAD...${base}`])] as const),
+  )
+
+  for (const [base, result] of counted) {
+    const [ahead, behind] = result.output.trim().split(/\s+/).map(Number)
+
+    if (result.error === undefined && Number.isInteger(ahead) && Number.isInteger(behind)) {
+      counts[base] = [ahead ?? 0, behind ?? 0]
+    }
+  }
+
+  return counts
+}
+
+/**
+ * Asks which branch the git diff compares with: the pane lists them (or the `offered` ones,
+ * when a typed name fits several) over a field for any other, and that field takes the keys.
+ */
+export async function askBase(
+  $: Engine,
+  settings: Settings,
+  file: string,
+  message?: string,
+  offered?: readonly string[],
+): Promise<void> {
   const cwd = await $.session.cwd()
   const path = absolute(cwd, file)
+  // A deleted file's folder may be gone too: git runs in the nearest one left.
+  const folder = await existingFolder($, dirname(path))
+  const bases = offered === undefined ? await branchesOf($, folder) : [...offered]
 
   await show(
     $,
@@ -596,40 +804,180 @@ export async function askBase($: Engine, settings: Settings, file: string, messa
       mode: 'bases',
       cwd,
       path,
-      bases: await branchesOf($, dirname(path)),
+      bases,
+      baseCounts: await countsOf($, folder, bases),
       ...(message === undefined ? {} : { message }),
       ...(await carried($, path)),
     },
     basename(path),
+    // What is typed next is a branch's name: the pane asks for the keyboard, docked too.
+    true,
   )
   await $.ui.focus({ requestId: PANE, key: 'base' }).catch(() => undefined)
+}
+
+/**
+ * What a typed base names: itself when git resolves it to a commit (a branch, a tag, a SHA,
+ * `HEAD~1`); else the one branch it fits, the whole name first, then a part of it.
+ */
+export async function resolveBase(
+  $: Engine,
+  folder: string,
+  typed: string,
+): Promise<{ base: string } | { candidates: string[] } | { isUnknown: true }> {
+  const wanted = typed.trim()
+
+  // A leading dash would read as an option of git's.
+  if (!wanted.startsWith('-')) {
+    const resolved = await git($, folder, ['rev-parse', '--verify', '--quiet', `${wanted}^{commit}`])
+
+    if (resolved.error === undefined && resolved.output.trim() !== '') {
+      return { base: wanted }
+    }
+  }
+
+  const found = branchesNamed(await allBranches($, folder), wanted)
+  const meant = preferredBranch(found, wanted)
+
+  return meant !== undefined ? { base: meant } : found.length > 0 ? { candidates: found.slice(0, BASES) } : { isUnknown: true }
 }
 
 /** Takes the base picked or typed (part of a branch's name is enough) and shows the diff against it. */
 export async function chooseBase($: Engine, settings: Settings, file: string, typed: string): Promise<void> {
   const wanted = typed.trim()
+  // Picked for the `changes` list, the list opens after it.
+  const isForChanges = (await read($, view)).basesFor === 'changes'
 
   if (wanted === '') {
-    return askBase($, settings, file)
+    return isForChanges ? askBaseForChanges($, settings, dirname(file)) : askBase($, settings, file)
   }
 
   const cwd = await $.session.cwd()
-  const branches = wanted === 'HEAD' ? [] : await branchesOf($, dirname(absolute(cwd, file)))
-  const base = branches.includes(wanted) ? wanted : (rank(branches, wanted, 1)[0] ?? wanted)
+  const folder = await existingFolder($, dirname(absolute(cwd, file)))
+  const resolved = await resolveBase($, folder, wanted)
+  // Asked again, the picker stays the one it was: the diff's, or the `changes` list's.
+  const askAgain = (message: string, offered?: readonly string[]) =>
+    isForChanges ? askBaseForChanges($, settings, folder, message, offered) : askBase($, settings, file, message, offered)
 
-  await update($, diffBase, () => base)
+  if ('candidates' in resolved) {
+    const count = resolved.candidates.length
+
+    return askAgain(
+      `"${clean(wanted)}" is ambiguous: ${count}${count === BASES ? '+' : ''} branches match it. Pick one, or type more of its name.`,
+      resolved.candidates,
+    )
+  }
+
+  if ('isUnknown' in resolved) {
+    return askAgain(`No branch or commit named "${clean(wanted)}".`)
+  }
+
+  await update($, diffBase, () => resolved.base)
+
+  if (isForChanges) {
+    await showChanges($, settings)
+
+    return
+  }
 
   return showGitDiff($, settings, file)
+}
+
+/** The nearest folder above `folder` that is on disk, itself included: a deleted file's may be gone. */
+async function existingFolder($: Engine, folder: string): Promise<string> {
+  let dir = folder
+
+  for (let step = 0; step < 40 && dir !== '/'; step += 1) {
+    if ((await $.fs.stat(dir).catch(() => undefined))?.kind === 'dir') {
+      return dir
+    }
+
+    dir = dirname(dir)
+  }
+
+  return folder
+}
+
+/** The top of the repository a folder lies in, spelled as the folder is; or why there is none. */
+async function repoOf($: Engine, folder: string): Promise<{ root: string } | { error: string }> {
+  const up = await git($, folder, ['rev-parse', '--show-cdup'])
+
+  if (up.error !== undefined) {
+    return {
+      error: /not a git repository/i.test(up.error)
+        ? 'Not in a git repository: this file has no git diff.'
+        : `git cannot be asked here: ${up.error}`,
+    }
+  }
+
+  let root = folder
+
+  for (const part of up.output.trim().split('/')) {
+    root = part === '..' ? dirname(root) : root
+  }
+
+  return { root }
+}
+
+/** The commit the branch left `base` at, run in `root`: `HEAD` for the base `HEAD`. */
+async function forkOf($: Engine, root: string, base: string): Promise<string | undefined> {
+  if (base === 'HEAD') {
+    return 'HEAD'
+  }
+
+  const fork = await git($, root, ['merge-base', base, 'HEAD'])
+
+  return fork.error !== undefined || fork.output.trim() === '' ? undefined : fork.output.trim()
+}
+
+/** Each hunk with the tokenizer's state entering it, from the lines of the file on disk before it. */
+async function seeded($: Engine, settings: Settings, path: string, hunks: Hunk[]): Promise<Hunk[]> {
+  const language = settings.isEngineOnly ? undefined : languageOf(path)
+
+  if (language === undefined || hunks.length === 0) {
+    return hunks
+  }
+
+  const text = await $.fs.read(path).catch(() => undefined)
+
+  if (text === undefined || text.includes('\u0000')) {
+    return hunks
+  }
+
+  const lines = splitLines(text)
+  let state = ''
+  let at = 0
+
+  return hunks.map(hunk => {
+    const until = Math.min(lines.length, hunk.newStart - 1)
+
+    for (; at < until; at += 1) {
+      state = tokenizeLine(language, lines[at] ?? '', state).state
+    }
+
+    return { ...hunk, lexState: state }
+  })
 }
 
 /**
  * The person's own changes of a file against the base they picked: what differs from the
  * commit their branch left it at, the uncommitted included, so nothing the base gained since.
+ * A file deleted, new (untracked too) or renamed since shows as such; `first` is the 0-based
+ * line of the whole diff the page starts at.
  */
-export async function showGitDiff($: Engine, settings: Settings, file: string): Promise<void> {
+export async function showGitDiff($: Engine, settings: Settings, file: string, first = 0): Promise<void> {
   const cwd = await $.session.cwd()
   const path = absolute(cwd, file)
-  const folder = dirname(path)
+  const isOnDisk = (await $.fs.stat(path).catch(() => undefined))?.kind === 'file'
+  const kept = await carried($, path)
+  const say = (message: string) => show($, settings, { mode: 'empty', cwd, path, message, ...kept }, basename(path))
+  const repo = await repoOf($, isOnDisk ? dirname(path) : await existingFolder($, dirname(path)))
+
+  if ('error' in repo) {
+    return say(repo.error)
+  }
+
+  const { root } = repo
   const base = await read($, diffBase)
 
   if (base === '') {
@@ -637,47 +985,273 @@ export async function showGitDiff($: Engine, settings: Settings, file: string): 
   }
 
   // Diffing from the fork point leaves out what the base branch gained since.
-  let sinceCommit = 'HEAD'
+  const sinceCommit = await forkOf($, root, base)
 
-  if (base !== 'HEAD') {
-    const fork = await git($, folder, ['merge-base', base, 'HEAD'])
-
-    if (fork.error !== undefined || fork.output.trim() === '') {
-      return askBase($, settings, path, `git has no "${clean(base)}" here to compare with: pick another.`)
-    }
-
-    sinceCommit = fork.output.trim()
+  if (sinceCommit === undefined) {
+    return askBase($, settings, path, `git has no "${clean(base)}" here to compare with: pick another.`)
   }
 
-  const diff = await git($, folder, ['diff', sinceCommit, '--no-color', '--no-ext-diff', `-U${DIFF_CONTEXT}`, '--', path])
-  const hunks = parsePatch(diff.output)
+  const rel = relative(root, path)
+  const wasThere = (await git($, root, ['cat-file', '-e', `${sinceCommit}:${rel}`])).error === undefined
 
-  if (hunks.length > 0) {
-    const fitted = fitHunks(hunks, DIFF_LINES)
+  if (!wasThere && !isOnDisk) {
+    return say(`There is no ${clean(rel)} here, nor where your branch left ${clean(base)}.`)
+  }
 
-    return show(
+  let specs = [`:(literal)${rel}`]
+  let aside: string | undefined
+
+  // On one side only: new, deleted, or one end of a rename.
+  if (wasThere !== isOnDisk) {
+    const renames = await git($, root, ['diff', '-M', '--name-status', '-z', '--diff-filter=R', sinceCommit])
+    const pair = parseChanges(renames.output, '').find(change =>
+      change.mark === 'R' && (isOnDisk ? change.path === rel : change.from === rel),
+    )
+
+    if (pair?.from !== undefined) {
+      specs = [`:(literal)${pair.from}`, `:(literal)${pair.path}`]
+      aside = isOnDisk ? `renamed from ${clean(pair.from)}` : `renamed to ${clean(pair.path)}`
+    } else {
+      aside = isOnDisk ? 'new file' : 'deleted'
+    }
+  }
+
+  let diff = await git($, root, ['diff', sinceCommit, '-M', '--no-color', '--no-ext-diff', `-U${DIFF_CONTEXT}`, '--', ...specs])
+  let hunks = parsePatch(diff.output)
+
+  // A file git does not track yet, as Claude just wrote it: the whole of it is new.
+  if (hunks.length === 0 && diff.error === undefined && aside === 'new file' && !/^Binary files /m.test(diff.output)) {
+    if ((await git($, root, ['check-ignore', '-q', '--', rel])).error === undefined) {
+      return say('git ignores this file: it has no git diff.')
+    }
+
+    aside = 'new file, untracked'
+    diff = await git(
       $,
-      settings,
-      {
-        mode: 'diff',
-        cwd,
-        path,
-        diffKind: 'git',
-        diffBase: base,
-        hunks: fitted.hunks,
-        isCut: fitted.isCut,
-        ...(await carried($, path)),
-      },
-      basename(path),
+      root,
+      ['diff', '--no-index', '--no-color', '--no-ext-diff', `-U${DIFF_CONTEXT}`, '--', '/dev/null', rel],
+      [0, 1],
+    )
+    hunks = parsePatch(diff.output)
+  }
+
+  if (hunks.length === 0) {
+    const what = aside === undefined ? '' : ` (${aside})`
+
+    return say(
+      diff.error !== undefined
+        ? `git diff failed: ${diff.error}`
+        : /^Binary files |^GIT binary patch/m.test(diff.output)
+          ? `Binary file${what}: it differs from ${clean(base)}, but git shows no lines of it.`
+          : aside?.startsWith('renamed') === true
+            ? `The file was ${aside} against ${clean(base)}, with no line changed.`
+            : aside === 'new file, untracked'
+              ? 'New file, untracked: it is empty.'
+              : await noChangesWhy($, root, path, base, sinceCommit),
     )
   }
 
-  const message =
-    diff.error === undefined
-      ? `No changes of yours against ${clean(base)} (a file git does not track shows none).`
-      : `git diff failed: ${diff.error}`
+  // The counts are the whole diff's; the page is what fits a drawn tree.
+  const counts = countHunks(hunks)
+  const start = Math.max(0, Math.min(first, counts.total - 1))
+  const page = pageHunks(hunks, start, DIFF_LINES)
 
-  return show($, settings, { mode: 'empty', cwd, path, message, ...(await carried($, path)) }, basename(path))
+  return show(
+    $,
+    settings,
+    {
+      mode: 'diff',
+      cwd,
+      path,
+      diffKind: 'git',
+      diffBase: base,
+      hunks: await seeded($, settings, path, page.hunks),
+      isCut: page.isCut,
+      diffAdded: counts.added,
+      diffRemoved: counts.removed,
+      diffFirst: start,
+      diffTotal: counts.total,
+      ...(aside === undefined ? {} : { diffNote: aside }),
+      ...kept,
+    },
+    basename(path),
+  )
+}
+
+/** Turns the page of the git diff in view: `first` is the 0-based line of the whole diff to start at. */
+export async function turnDiffPage($: Engine, settings: Settings, first: number): Promise<void> {
+  const current = await read($, view)
+
+  if (current.mode !== 'diff' || current.diffKind !== 'git' || current.path === undefined) {
+    return
+  }
+
+  return showGitDiff($, settings, current.path, Math.max(0, first))
+}
+
+/** True when git knew `path` where the branch left the base (or, with no base yet, in any branch's history). */
+async function wasTracked($: Engine, path: string): Promise<boolean> {
+  const repo = await repoOf($, await existingFolder($, dirname(path)))
+
+  if ('error' in repo) {
+    return false
+  }
+
+  const rel = relative(repo.root, path)
+  const base = await read($, diffBase)
+  const sinceCommit = base === '' ? undefined : await forkOf($, repo.root, base)
+
+  if (sinceCommit !== undefined) {
+    return (await git($, repo.root, ['cat-file', '-e', `${sinceCommit}:${rel}`])).error === undefined
+  }
+
+  // With no base chosen yet, any branch that ever held it will do: the base is asked for next.
+  return (await git($, repo.root, ['log', '-1', '--all', '--format=%h', '--', `:(literal)${rel}`])).output.trim() !== ''
+}
+
+/** Asks which branch the `changes` list compares with: the same picker, the list opening after it. */
+export async function askBaseForChanges(
+  $: Engine,
+  settings: Settings,
+  folder: string,
+  message?: string,
+  offered?: readonly string[],
+): Promise<void> {
+  const inFolder = await existingFolder($, folder)
+  const bases = offered === undefined ? await branchesOf($, inFolder) : [...offered]
+
+  await show(
+    $,
+    settings,
+    {
+      mode: 'bases',
+      cwd: await $.session.cwd(),
+      basesFor: 'changes',
+      bases,
+      baseCounts: await countsOf($, inFolder, bases),
+      ...(message === undefined ? {} : { message }),
+    },
+    'Changes',
+    // What is typed next is a branch's name: the pane asks for the keyboard, docked too.
+    true,
+  )
+  await $.ui.focus({ requestId: PANE, key: 'base' }).catch(() => undefined)
+}
+
+/**
+ * Every file that differs between the fork point with the base and the working tree, the
+ * untracked included, each with its mark and counts. Answers one line saying what it found.
+ */
+export async function showChanges($: Engine, settings: Settings): Promise<string> {
+  const cwd = await $.session.cwd()
+  const current = await read($, view)
+  const folder = current.path === undefined ? cwd : await existingFolder($, dirname(current.path))
+  const say = async (message: string) => {
+    await show($, settings, { mode: 'changes', cwd, message }, 'Changes')
+
+    return `Code viewer: ${message}`
+  }
+  const repo = await repoOf($, folder)
+
+  if ('error' in repo) {
+    return say(repo.error.replace('this file has', 'there is'))
+  }
+
+  const { root } = repo
+  const base = await read($, diffBase)
+
+  if (base === '') {
+    await askBaseForChanges($, settings, root)
+
+    return 'Code viewer: pick the branch to compare with.'
+  }
+
+  const sinceCommit = await forkOf($, root, base)
+
+  if (sinceCommit === undefined) {
+    await askBaseForChanges($, settings, root, `git has no "${clean(base)}" here to compare with: pick another.`)
+
+    return `Code viewer: git has no "${base}" here.`
+  }
+
+  const names = await git($, root, ['diff', '-M', '--name-status', '-z', sinceCommit])
+
+  if (names.error !== undefined) {
+    return say(`git diff failed: ${names.error}`)
+  }
+
+  const numbers = await git($, root, ['diff', '-M', '--numstat', '-z', sinceCommit])
+  const others = await git($, root, ['ls-files', '--others', '--exclude-standard', '-z'])
+  const all: Change[] = [
+    ...parseChanges(names.output, numbers.output),
+    ...others.output
+      .split('\u0000')
+      .filter(name => name !== '')
+      .map(name => ({ path: name, mark: '?' as const })),
+  ].sort((left, right) => (left.path < right.path ? -1 : left.path > right.path ? 1 : 0))
+  const changes: Change[] = []
+
+  for (const change of all.slice(0, CHANGES)) {
+    let counted: Pick<Change, 'added' | 'removed'> = {}
+
+    // git counts no lines of an untracked file: the file's own are its added ones.
+    if (change.mark === '?') {
+      const text = await $.fs.read(`${root}/${change.path}`).catch(() => undefined)
+
+      counted = text === undefined || text.includes('\u0000') ? {} : { added: splitLines(text).length, removed: 0 }
+    }
+
+    changes.push({ ...change, ...counted, path: `${root}/${change.path}` })
+  }
+
+  const sum = (key: 'added' | 'removed') =>
+    [...all.filter(change => change.mark !== '?'), ...changes.filter(change => change.mark === '?')].reduce(
+      (total, change) => total + (change[key] ?? 0),
+      0,
+    )
+
+  await show(
+    $,
+    settings,
+    {
+      mode: 'changes',
+      cwd,
+      diffBase: base,
+      changes,
+      changeCount: all.length,
+      changeAdded: sum('added'),
+      changeRemoved: sum('removed'),
+      ...(all.length === 0 ? { message: `No changes of yours against ${clean(base)}.` } : {}),
+    },
+    'Changes',
+  )
+
+  return `Code viewer: ${all.length} ${all.length === 1 ? 'file' : 'files'} changed against ${base}.`
+}
+
+/** Why the diff against `base` is empty: the branch already in it, or a file git does not track. */
+async function noChangesWhy($: Engine, folder: string, path: string, base: string, sinceCommit: string): Promise<string> {
+  const name = clean(base)
+  const isTracked = (await git($, folder, ['ls-files', '--error-unmatch', '--', path])).error === undefined
+  const untracked = isTracked ? '' : ' (a file git does not track shows none).'
+
+  if (base === 'HEAD') {
+    return `No uncommitted changes in this file${untracked || '.'}`
+  }
+
+  const head = (await git($, folder, ['rev-parse', 'HEAD'])).output.trim()
+
+  if (head !== '' && head === sinceCommit) {
+    const behind = Number((await git($, folder, ['rev-list', '--count', `HEAD..${base}`])).output.trim())
+    const where =
+      Number.isInteger(behind) && behind > 0
+        ? `your branch is already merged into ${name} (${behind} ${behind === 1 ? 'commit' : 'commits'} behind it)`
+        : `${name} is at your own commit`
+
+    return `No changes of yours against ${name}: ${where}, so there is nothing of yours to show${untracked || '.'}`
+  }
+
+  return `No changes of yours to this file against ${name}${untracked || '.'}`
 }
 
 /** Opens what the person typed: a file, its diff, or the files that match. Answers one line saying which. */
@@ -688,26 +1262,33 @@ export async function find($: Engine, settings: Settings, typed: string, opensBe
   await update($, suggestions, () => [])
 
   const wantsDiff = /^diff(?:\s|$)/.test(typed.trim())
+  const diffOf = async (file: string): Promise<string> => {
+    await showGitDiff($, settings, file)
+
+    const name = relative(cwd, absolute(cwd, file))
+
+    return (await read($, diffBase)) === ''
+      ? `Code viewer: pick the branch to diff ${name} against.`
+      : `Code viewer: git diff of ${name}.`
+  }
   const query = typed.trim().replace(/^diff(?:\s+|$)/, '')
   const current = await read($, view)
 
   if (query === '') {
     if (wantsDiff && current.path !== undefined) {
-      await showGitDiff($, settings, current.path)
-
-      return `Code viewer: git diff of ${relative(cwd, current.path)}.`
+      return diffOf(current.path)
     }
 
-    await showList($, settings)
+    // Nothing named: the search field takes the keys, docked too, so the name typed next is the file's.
+    await show($, settings, { mode: 'empty', cwd }, 'Code', true)
+    await $.ui.focus({ requestId: PANE, key: 'search' }).catch(() => undefined)
 
     return 'Code viewer: the files of this session.'
   }
 
   const open = async (file: string, line?: number): Promise<string> => {
     if (wantsDiff) {
-      await showGitDiff($, settings, file)
-
-      return `Code viewer: git diff of ${relative(cwd, absolute(cwd, file))}.`
+      return diffOf(file)
     }
 
     await showFile($, settings, file, line)
@@ -722,13 +1303,26 @@ export async function find($: Engine, settings: Settings, typed: string, opensBe
     return open(path, line)
   }
 
+  // A file deleted on the branch is on disk no more, but its diff is still there to see.
+  if (wantsDiff && stat === undefined && (await wasTracked($, absolute(cwd, path)))) {
+    return open(path)
+  }
+
   // The closest files, the session's first: the same list the field draws as it is typed.
   const results = await matchesOf($, path, RESULTS)
   const first = results[0]
   const isMine = first !== undefined && (await read($, touched)).some(entry => entry.path === first)
   const scope = isMine ? 'session' : 'project'
+  // A name, or a path's tail, that one file alone has exactly is that file.
+  const knownRoots = await read($, roots)
+  const exactly = path.toLowerCase().replace(/^\.\//, '')
+  const exact = results.filter(file => {
+    const name = shortOf(file, cwd, knownRoots).toLowerCase()
+
+    return name === exactly || name.endsWith(`/${exactly}`) || file.toLowerCase().endsWith(`/${exactly}`)
+  })
   // Enter in the field opens the first; a command lists what it found when the project has several.
-  const only = opensBest || isMine || results.length === 1 ? first : undefined
+  const only = opensBest || isMine || results.length === 1 ? first : exact.length === 1 ? exact[0] : undefined
 
   if (only !== undefined) {
     return open(only, line)
@@ -743,10 +1337,15 @@ export async function find($: Engine, settings: Settings, typed: string, opensBe
       scope,
       query: path,
       results,
+      ...(line === undefined ? {} : { resultLine: line }),
       ...(results.length === 0 ? { message: `No file matches "${clean(path)}".` } : {}),
     },
     'Find file',
   )
+  // The ring starts on the first: Enter opens it, the arrows walk the others.
+  if (results.length > 0) {
+    await $.ui.focus({ requestId: PANE, key: 'result-0' }).catch(() => undefined)
+  }
 
   return results.length === 0
     ? `Code viewer: no file matches "${path}".`

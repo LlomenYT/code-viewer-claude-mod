@@ -2,11 +2,13 @@
 
 # 👁 Code Viewer for Claude Code
 
+<img src="assets/screenshot.png" alt="The Code Viewer pane showing a git diff against origin/pre, with tabs, added and removed lines highlighted" width="640">
+
 **Read the code Claude is touching without leaving the conversation.**
 
 A side pane for [Claude Code](https://claude.com/claude-code) with tabs, fuzzy file search, syntax highlighting and clean diffs.
 
-[![Version](https://img.shields.io/badge/version-0.0.1-D97757?style=for-the-badge)](.claude-plugin/plugin.json)
+[![Version](https://img.shields.io/badge/version-0.0.2-D97757?style=for-the-badge)](.claude-plugin/plugin.json)
 [![Claude Code mod](https://img.shields.io/badge/Claude%20Code-mod-D97757?style=for-the-badge&logo=claude&logoColor=white)](https://claude.com/claude-code)
 [![Built with Claude](https://img.shields.io/badge/built%20with-Claude-191919?style=for-the-badge&logo=anthropic&logoColor=white)](https://www.anthropic.com/claude)
 [![License: MIT](https://img.shields.io/badge/license-MIT-2ea44f?style=for-the-badge)](LICENSE)
@@ -15,13 +17,13 @@ A side pane for [Claude Code](https://claude.com/claude-code) with tabs, fuzzy f
 
 ---
 
-> **v0.0.1** is the first release of the mod. The Claude Code mod API is early access and can change between releases; this version was written against Claude Code 2.1.319.
+> **v0.0.2** adds a list of every file changed against a branch, diffs of deleted, new and renamed files, paging of long diffs, stricter base branch matching and many keyboard and highlighting fixes. The Claude Code mod API is early access and can change between releases; this version was written against Claude Code 2.1.322.
 
 ## ✨ What it does
 
 | | Feature | How it works |
 | --- | --- | --- |
-| 👁 | **One button to open it** | A `👁 code viewer` row sits above the prompt. Click it to open or close the pane; `/code-viewer` does the same. |
+| 👁 | **One button to open it** | A `👁 code viewer` row sits above the prompt. Click it to open the pane; it steps aside while the pane is open, so `ctrl+x tab` goes straight to the pane. `/code-viewer` opens and closes it too. |
 | 🗂 | **Session files** | The pane lists the code files Claude changed (`±`), read (`▸`) or named in an answer (`·`), latest first. |
 | 🔎 | **Fuzzy search** | Type part of a name or path and results appear under the field as you type. `Enter` opens the first; `↓` picks another. |
 | 📑 | **Tabs** | Every file you open stays as a tab (up to nine). Hover a tab to get a red `×`, or press `w`. |
@@ -77,7 +79,9 @@ You can also open things straight from the conversation:
 | `l` | Back to the session files |
 | `f` / `c` / `g` | File / Claude's diff / git diff |
 | `b` | Choose the branch to diff against |
-| `p` / `n` | Previous / next page |
+| `d` | List every file changed against that branch (`/code-viewer changes` does the same) |
+| `p` / `n` | Previous / next page, of a file or of a long git diff |
+| `k` | Clear the session files list (while it is shown) |
 | `m` | Minimize to one line |
 | `x` | Close the pane |
 | `Esc` | Back to the prompt |
@@ -135,6 +139,6 @@ claude plugin test .
 
 <div align="center">
 
-Made for <a href="https://claude.com/claude-code">Claude Code</a> · Code Viewer v0.0.1
+Made for <a href="https://claude.com/claude-code">Claude Code</a> · Code Viewer v0.0.2
 
 </div>
