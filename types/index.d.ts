@@ -48,6 +48,15 @@ export type View = {
   /** `file`: the tokenizer's state entering `lines[0]`. */
   lexState?: string
 
+  /** `file`: what is searched for in it, while the search-in-file field is up; empty before a letter is typed. */
+  needle?: string
+  /** `file`: the lines that hold `needle`, 1-based, up to a number kept. */
+  hits?: number[]
+  /** `file`: how many lines hold it in all. */
+  hitCount?: number
+  /** `file`: which of `hits` is the current one, 0-based. */
+  hitAt?: number
+
   /** `diff`: whose change it is. */
   diffKind?: 'claude' | 'git'
   /** `diff` of kind `git`: what the file is compared with, a branch or `HEAD`. */

@@ -8,6 +8,9 @@ import {
   CHANGES,
   DIFF_LINES,
   EMPTY,
+  FIND,
+  FIND_DOWN,
+  FIND_UP,
   PAGE,
   PANE,
   askBase,
@@ -15,13 +18,18 @@ import {
   chooseBase,
   clearList,
   clearSearch,
+  closeFind,
   closeTab,
+  dirtyFiles,
   find,
+  findInFile,
   firstChange,
   headerHeight,
   note,
   noteMentions,
   noteRoot,
+  noteShellChanges,
+  openFind,
   say,
   showChanges,
   showDiff,
@@ -31,13 +39,14 @@ import {
   showTab,
   scrolled,
   startTurn,
+  stepFind,
   toggle,
   toggleCollapsed,
   turnDiffPage,
   turnPage,
   typing,
 } from './actions'
-import { basename, clean, dirname, hunksOf, mentionsOf, relative, shortOf, unified } from './files'
+import { basename, clean, dirname, findIn, hunksOf, mentionsOf, relative, shortOf, unified } from './files'
 import { resolveSettings } from './themes'
 import { languageOf, stateAfter, tokenizeLine } from './tokenize'
 import type { Kind, Span } from './tokenize'
@@ -63,6 +72,10 @@ const CHANGE_COLORS = { A: 'success', M: 'warning', D: 'error', R: 'suggestion',
 export const register: Register = (on, options) => {
   const settings = resolveSettings(options)
   const { theme } = settings
+  // The pane's element the ring is on, as its moves tell; and the stop a move to which was
+  // answered with a step through the search's hits, whose press (a click's) must not step again.
+  let ringOn: string | undefined
+  let steppedBy: string | undefined
 
   // One set of Text props per token kind, built once.
   const styles: Partial<Record<Kind, TextProps>> = {}
@@ -106,6 +119,8 @@ export const register: Register = (on, options) => {
 
   // The session's files: what Claude read or changed, as each call ends.
   on('tool.call', async ($, event, next) => {
+    // A shell command names no file it writes: what git calls changed, before and after, tells them.
+    const before = event.tool === 'Bash' ? await dirtyFiles($).catch(() => undefined) : undefined
     const result = await next(event)
     const file = (event as { file_path?: unknown }).file_path
 
@@ -127,6 +142,10 @@ export const register: Register = (on, options) => {
       for (const named of mentionsOf(command, 4).folders.slice(0, 3)) {
         await noteRoot($, named).catch(() => undefined)
       }
+    }
+
+    if (before !== undefined) {
+      await noteShellChanges($, before).catch(() => undefined)
     }
 
     return result
@@ -156,8 +175,24 @@ export const register: Register = (on, options) => {
 
   // The ring leaving the search field for anything but what it found (Tab, a click) empties it.
   on('ui.focus', { requestId: PANE }, async ($, event, next) => {
+    // From the search-in-file field the arrows walk what it found, as an editor's do: the ring
+    // would go to the stop above or below the field, and stays, while the hit before or after is shown.
+    const isStop = event.element === FIND_UP || event.element === FIND_DOWN
+
+    if (isStop && ringOn === FIND && event.origin.kind === 'person' && ((await read($, view)).hits?.length ?? 0) > 0) {
+      steppedBy = event.element
+      await stepFind($, settings, event.element === FIND_UP ? -1 : 1).catch(() => undefined)
+
+      return { deny: 'the search field keeps the keyboard while it has matches' }
+    }
+
     const result = await next(event)
     const element = event.element ?? ''
+
+    if (result.deny === undefined) {
+      ringOn = event.element
+      steppedBy = undefined
+    }
 
     if (result.deny === undefined && element !== 'search' && !element.startsWith('found-')) {
       await clearSearch($).catch(() => undefined)
@@ -324,6 +359,48 @@ export const register: Register = (on, options) => {
       })
     }
 
+    // A line with what the search in the file found on it: each match on the theme's match colors.
+    const needle = current.mode === 'file' ? (current.needle ?? '') : ''
+    const matched = (spans: readonly Span[], ranges: ReadonlyArray<readonly [number, number]>) => {
+      const nodes: Array<string | ReturnType<typeof h>> = []
+      let offset = 0
+      let rangeAt = 0
+
+      for (const [kind, text] of merged(spans)) {
+        const style = styles[kind]
+        let at = 0
+
+        while (at < text.length) {
+          const range = ranges[rangeAt]
+          const isHit = range !== undefined && offset + at >= range[0]
+          const end = Math.min(text.length, range === undefined ? text.length : (isHit ? range[1] : range[0]) - offset)
+          const piece = text.slice(at, end)
+
+          nodes.push(
+            isHit ? (
+              <Text backgroundColor={theme.match} color={theme.matchText}>
+                {piece}
+              </Text>
+            ) : style === undefined ? (
+              piece
+            ) : (
+              <Text {...style}>{piece}</Text>
+            ),
+          )
+
+          if (isHit && range !== undefined && offset + end >= range[1]) {
+            rangeAt += 1
+          }
+
+          at = end
+        }
+
+        offset += text.length
+      }
+
+      return nodes
+    }
+
     const fileBody = () => {
       const lines = current.lines ?? []
       const first = current.firstLine ?? 1
@@ -343,12 +420,14 @@ export const register: Register = (on, options) => {
               onPress={() => turnPage($, paneSettings, Math.max(1, first - PAGE))}
             />
           )}
-          {language === undefined || path === undefined ? (
+          {(language === undefined || path === undefined) && needle === '' ? (
             <Code source={lines.join('\n')} path={path ?? ''} startLine={first} wrap={wrap} />
           ) : (
             lines.map((line, index) => {
-              const lexed = tokenizeLine(language, line, state)
+              // A language left to the engine's highlighter is drawn plain while it is searched.
+              const lexed = language === undefined ? { spans: [['plain', line]] as Span[], state } : tokenizeLine(language, line, state)
               const number = first + index
+              const ranges = findIn(line, needle)
 
               state = lexed.state
 
@@ -361,7 +440,7 @@ export const register: Register = (on, options) => {
                   <Box flexShrink={0}>
                     <Text color={theme.lineNumber}>{`${String(number).padStart(width)} `}</Text>
                   </Box>
-                  <Text wrap={wrap}>{paint(lexed.spans)}</Text>
+                  <Text wrap={wrap}>{ranges.length > 0 ? matched(lexed.spans, ranges) : paint(lexed.spans)}</Text>
                 </Box>
               )
             })
@@ -719,6 +798,79 @@ export const register: Register = (on, options) => {
       </Box>
     )
 
+    // The search in the file: its field between the two stops the arrows reach from it, then
+    // which match is the current one of how many, and a close.
+    const findStep = (stop: string, by: 1 | -1) => async () => {
+      // A click on a stop from the field was answered as the ring's move was.
+      if (steppedBy === stop) {
+        steppedBy = undefined
+
+        return
+      }
+
+      await stepFind($, paneSettings, by)
+    }
+    const findRow = () => {
+      const count = current.hitCount ?? 0
+      const kept = current.hits?.length ?? 0
+      const typed = current.needle ?? ''
+      const tally =
+        typed === ''
+          ? ''
+          : count === 0
+            ? 'no match'
+            : `${(current.hitAt ?? 0) + 1} of ${kept}${count > kept ? ` (${count} lines match)` : ''}`
+
+      // Three rows, for the arrows go to what is drawn above and below the field, not beside it.
+      return (
+        <Box key="find-row" flexDirection="column">
+          <Box flexDirection="row" columnGap={2}>
+            <Button key={FIND_UP} plain onPress={findStep(FIND_UP, -1)}>
+              <Text dimColor hover={{ dimColor: false }}>
+                ▲ previous match
+              </Text>
+            </Button>
+            {tally !== '' && <Text color={count === 0 ? 'error' : 'warning'}>{tally}</Text>}
+          </Box>
+          <Input
+            key={FIND}
+            autoFocus
+            label="Find in file"
+            value={typed}
+            placeholder={typed === '' ? 'text to find, then Enter or ↑↓' : typed}
+            submitLabel="next"
+            onInput={value => {
+              // The module's own moves of the ring skip its hooks: typing here tells where it is.
+              ringOn = FIND
+              void findInFile($, paneSettings, value)
+            }}
+            onSubmit={value => {
+              ringOn = FIND
+              // The surface empties the field at Enter: empty with a search on, it is Enter again,
+              // the next match; emptied by the person (which `onInput` told), it closes the search.
+              void (value === '' && typed === ''
+                ? closeFind($)
+                : value === '' || value === typed
+                  ? stepFind($, paneSettings, 1)
+                  : findInFile($, paneSettings, value))
+            }}
+          />
+          <Box flexDirection="row" columnGap={2}>
+            <Button key={FIND_DOWN} plain onPress={findStep(FIND_DOWN, 1)}>
+              <Text dimColor hover={{ dimColor: false }}>
+                ▼ next match
+              </Text>
+            </Button>
+            <Button key="find-close" plain onPress={() => closeFind($)}>
+              <Text dimColor hover={{ dimColor: false, color: 'error' }}>
+                × close search
+              </Text>
+            </Button>
+          </Box>
+        </Box>
+      )
+    }
+
     const shownDiffLines = (current.hunks ?? []).reduce((sum, hunk) => sum + hunk.lines.length, 0)
     const about =
       current.mode === 'file'
@@ -764,11 +916,15 @@ export const register: Register = (on, options) => {
     const noFile = 'No file is open: pick one, or type its name.'
     const idleKeys: Array<[hotkey: string, message: string]> = [
       ...(current.isCollapsed === true
-        ? (['f', 'c', 'g', 'b', 'w', 'n', 'p', 's', 'l', 'd', 'k', ...'123456789'].map(key => [key, '']) as Array<[string, string]>)
+        ? (['f', 'c', 'g', 'b', 'w', 'n', 'p', 's', 'l', 'd', 'k', 'e', ...'123456789'].map(key => [key, '']) as Array<[string, string]>)
         : [
             ...(path === undefined
               ? ((current.mode === 'changes' ? ['f', 'g', 'w'] : ['f', 'g', 'b', 'w']).map(key => [key, noFile]) as Array<[string, string]>)
               : []),
+            // `e` searches in a file, where one is drawn.
+            ...(current.mode === 'file' && path !== undefined
+              ? []
+              : [['e', path === undefined ? noFile : 'Search works on the file itself: press f, then e.'] as [string, string]]),
             // `k` clears the session's list, where that list is drawn.
             ...(isListShown ? [] : [['k', ''] as [string, string]]),
             ...(path === undefined || current.claudeHunks === undefined
@@ -843,19 +999,38 @@ export const register: Register = (on, options) => {
     headerHeight(tabLines + (path === undefined ? 4 : 5))
 
     const keys = event.props.isFocused
-      ? '↑↓ scroll · p/n page · esc back to the prompt'
+      ? current.mode === 'file' && current.needle !== undefined
+        ? 'enter or ↓ next match · ↑ previous · enter on an empty field closes the search · esc back to the prompt'
+        : '↑↓ scroll · p/n page · esc back to the prompt'
       : `ctrl+x tab to use the keys${isFullscreen ? '' : ' · /tui fullscreen docks the pane, with the mouse'}`
     const folder = name.includes('/') ? name.slice(0, name.lastIndexOf('/') + 1) : ''
 
     return (
       <Box flexDirection="column">
         {openTabs.length > 0 && tabRow()}
-        <Text wrap="truncate-start">
-          <Text dimColor>{folder}</Text>
-          <Text weight="bold">{name.slice(folder.length)}</Text>
-          {isOutside && <Text dimColor> (outside the project)</Text>}
-          {about !== '' && <Text color="warning"> {about}</Text>}
-        </Text>
+        <Box flexDirection="row" columnGap={2}>
+          <Box flexShrink={1}>
+            <Text wrap="truncate-start">
+              <Text dimColor>{folder}</Text>
+              <Text weight="bold">{name.slice(folder.length)}</Text>
+              {isOutside && <Text dimColor> (outside the project)</Text>}
+              {about !== '' && <Text color="warning"> {about}</Text>}
+            </Text>
+          </Box>
+          {current.mode === 'file' &&
+            path !== undefined &&
+            choice(
+              'find-open',
+              'e',
+              'search in file',
+              current.needle !== undefined,
+              async () => {
+                await openFind($)
+                ringOn = FIND
+              },
+              true,
+            )}
+        </Box>
         <Box flexDirection="row" columnGap={2} flexWrap="wrap">
           {path !== undefined && choice('mode-file', 'f', 'file', current.mode === 'file', () => showFile($, paneSettings, path, current.focusLine))}
           {path !== undefined &&
@@ -924,6 +1099,7 @@ export const register: Register = (on, options) => {
         />
         {searchText.trim().length >= 2 && foundBody()}
         {current.message !== undefined && <Text color="warning">{current.message}</Text>}
+        {current.mode === 'file' && current.needle !== undefined && findRow()}
         {current.mode === 'file' && fileBody()}
         {current.mode === 'diff' && diffBody()}
         {current.mode === 'results' && resultsBody()}

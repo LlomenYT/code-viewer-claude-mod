@@ -1,6 +1,6 @@
 {
   "name": "code-viewer",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "description": "Code Viewer for Claude Code: open the files and diffs of your session in a side pane, with tabs, fuzzy search and themeable syntax highlighting.",
   "license": "MIT",
   "keywords": ["pane", "syntax-highlighting", "diff", "viewer"],

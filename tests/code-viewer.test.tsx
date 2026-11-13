@@ -4,6 +4,7 @@ import type { TestBody } from 'claude-code/testing'
 import {
   branchesNamed,
   clean,
+  findIn,
   fitHunks,
   hunksOf,
   isCode,
@@ -327,6 +328,8 @@ test('only code files count as the session\'s files', async () => {
   expect(['/p/notes.txt', '/p/PROGRESS.md', '/p/out.log', '/p/data.json'].some(isCode)).toBe(false)
   expect(isCode('/Users/x/.claude/projects/p/tool-results/abc.txt')).toBe(false)
   expect(isCode('/Users/x/.claude/skills/run.py')).toBe(false)
+  expect(['/tmp/bench_orgchart/check_contracts.py', '/private/tmp/claude-501/x/a.ts', '/var/folders/ab/T/run.py'].some(isCode)).toBe(false)
+  expect(isCode('/Users/x/tmp/app.py')).toBe(true)
 })
 
 test('the git diff asks for a branch, then shows only what the branch changed', async ($, on) => {
@@ -1389,4 +1392,134 @@ test('search ranks tighter: folders typed must match, and the session wins a tie
   expect(isCode('/repo/.claude/worktrees/wt1/.claude/plans/p.ts')).toBe(false)
   expect(clean('x'.repeat(5000), 4000)).toBe(`${'x'.repeat(4000)} … +1000 chars`)
   expect(clean('x'.repeat(500))).toBe(`${'x'.repeat(400)}…`)
+})
+
+test('files a shell command changes join the session\'s files, a submodule\'s too', async ($, on) => {
+  // What git calls changed, by repository, and each file's last write.
+  const dirty: Record<string, string[]> = { '/project': ['1 .M N... 100644 100644 100644 aaa bbb src/old.ts'], '/project/lib/ui': [] }
+  const written: Record<string, number> = { '/project/src/old.ts': 1 }
+
+  on('session.cwd', () => ({ value: '/project' }))
+  on('clock.now', () => ({ value: 0 }))
+  on('fs.stat', ($, event) => ({
+    value: { kind: 'file' as const, size: 1, mtimeMs: written[event.path] ?? 0, isLink: false },
+  }))
+  on('ui.panes', () => ({ value: [] }))
+  on('process.run', ($, event) => {
+    const args = event.argv.slice(1)
+    const cwd = String(event.init?.cwd ?? '/project')
+
+    return ok(args[0] === 'status' ? (dirty[cwd] ?? []).join('\0') : `${cwd}\n`)
+  })
+  on('tool.call', ($, event) => {
+    const command = String((event as { command?: unknown }).command)
+
+    if (command.startsWith('sed')) {
+      // Written again, a file already changed; and a new one, a renamed one, one in a submodule, a note.
+      written['/project/src/old.ts'] = 2
+      dirty['/project'] = [
+        '1 M. N... 100644 100644 100644 aaa bbb src/old.ts',
+        '2 R. N... 100644 100644 100644 aaa bbb R100 src/moved.ts',
+        'src/before.ts',
+        '1 .M S.M. 160000 160000 160000 aaa aaa lib/ui',
+        '? src/new file.py',
+        '? notes.md',
+      ]
+      dirty['/project/lib/ui'] = ['1 .M N... 100644 100644 100644 aaa bbb src/Button.tsx']
+    }
+
+    return { result: { stdout: '', stderr: '' } } as never
+  })
+
+  const pane = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const rows = async () => {
+    const names: string[] = []
+
+    for (let index = 0; index < 8; index += 1) {
+      const row = await pane.find({ type: 'Button', key: `touched-${index}` })
+      const text = row === undefined ? undefined : /"text":"(?:[±▸·] )?([^"]+\.(?:py|tsx?|md))/.exec(JSON.stringify(row))?.[1]
+
+      if (text !== undefined) {
+        names.push(text)
+      }
+    }
+
+    return names
+  }
+
+  // A command that writes nothing adds nothing: old.ts was changed before it ran.
+  await $.tool.call({ tool: 'Bash', command: 'git status' } as never)
+  expect(await rows()).toEqual([])
+
+  await $.tool.call({ tool: 'Bash', command: 'sed -i "" s/a/b/ src/old.ts' } as never)
+  expect(await rows()).toEqual(['old.ts src/old.ts', 'moved.ts src/moved.ts', 'Button.tsx lib/ui/src/Button.tsx', 'new file.py src/new file.py'])
+
+  // Staged and nothing else, they are not written again.
+  dirty['/project'] = ['1 M. N... 100644 100644 100644 aaa bbb src/new file.py']
+  await $.tool.call({ tool: 'Bash', command: 'git add .' } as never)
+  expect(await rows()).toEqual(['old.ts src/old.ts', 'moved.ts src/moved.ts', 'Button.tsx lib/ui/src/Button.tsx', 'new file.py src/new file.py'])
+  await pane.unmount()
+})
+
+test('a search in the file walks its matches across pages, wraps, and closes on an empty Enter', async ($, on) => {
+  const text = Array.from({ length: 500 }, (_, index) =>
+    index === 4 ? 'const Needle = needle()' : index === 249 || index === 479 ? `  call(needle, ${index + 1})` : `line${index + 1}`,
+  ).join('\n')
+
+  on('session.cwd', () => ({ value: '/project' }))
+  on('clock.now', () => ({ value: 0 }))
+  on('fs.stat', () => ({ value: { kind: 'file' as const, size: 1, mtimeMs: 0, isLink: false } }))
+  on('fs.read', () => ({ value: text }))
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('ui.scroll', () => ({}))
+  on('ui.focus', () => ({}))
+  on('process.run', () => ok(''))
+
+  const pane = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const tally = (wanted: RegExp) => pane.find({ type: 'Text', text: wanted })
+
+  // Without a file the key says so, and no field comes up.
+  await pane.press({ key: 'idle-e' })
+  expect(await pane.find({ type: 'Input', key: 'find-in-file' })).toBe(undefined)
+
+  await pane.input({ key: 'search', text: '/project/src/app.ts' })
+  await pane.press({ key: 'find-open' })
+  expect(await pane.find({ type: 'Input', key: 'find-in-file' })).toBeDefined()
+
+  await pane.input({ key: 'find-in-file', text: 'needle', kind: 'change' })
+  expect(await tally(/^1 of 3$/)).toBeDefined()
+  expect(await tally(/lines 2-201 of 500/)).toBeDefined()
+
+  // Enter and the stop below go on, to the page that holds the next; the stop above goes back.
+  await pane.input({ key: 'find-in-file', text: 'needle' })
+  expect(await tally(/^2 of 3$/)).toBeDefined()
+  expect(await tally(/lines 247-446 of 500/)).toBeDefined()
+  // Enter on the field the surface emptied at the last Enter goes on too.
+  await pane.input({ key: 'find-in-file', text: '' })
+  expect(await tally(/^3 of 3$/)).toBeDefined()
+  await pane.press({ key: 'find-down' })
+  expect(await tally(/^1 of 3$/)).toBeDefined()
+  expect(await tally(/lines 2-201 of 500/)).toBeDefined()
+  await pane.press({ key: 'find-up' })
+  expect(await tally(/^3 of 3$/)).toBeDefined()
+
+  // A capital counts; what is nowhere says so.
+  await pane.input({ key: 'find-in-file', text: 'Needle', kind: 'change' })
+  expect(await tally(/^1 of 1$/)).toBeDefined()
+  await pane.input({ key: 'find-in-file', text: 'nowhere', kind: 'change' })
+  expect(await tally(/^no match$/)).toBeDefined()
+
+  // Emptied, the field counts nothing; Enter on it empty takes it away.
+  await pane.input({ key: 'find-in-file', text: 'needle', kind: 'change' })
+  await pane.input({ key: 'find-in-file', text: '', kind: 'change' })
+  expect(await tally(/^\d+ of \d+$/)).toBe(undefined)
+  expect(await tally(/^no match$/)).toBe(undefined)
+  await pane.input({ key: 'find-in-file', text: '' })
+  expect(await pane.find({ type: 'Input', key: 'find-in-file' })).toBe(undefined)
+  await pane.unmount()
+
+  expect(findIn('const Needle = needle()', 'needle')).toEqual([[6, 12], [15, 21]])
+  expect(findIn('const Needle = needle()', 'Needle')).toEqual([[6, 12]])
+  expect(findIn('aaaa', 'aa')).toEqual([[0, 2], [2, 4]])
+  expect(findIn('abc', '')).toEqual([])
 })

@@ -405,15 +405,23 @@ export function insideWorktree(path: string): string {
   return path.replace(/^.*[\\/]\.claude[\\/]worktrees[\\/][^\\/]+(?=[\\/]|$)/, '')
 }
 
+const TEMPORARY = /^(?:\/private)?\/(?:tmp|var\/tmp|var\/folders)(?:\/|$)/
+
+/** True for a path in a temporary folder (`/tmp`, `/var/folders/…` on macOS): Claude's scratch scripts and benchmarks. */
+export function isTemporary(path: string): boolean {
+  return TEMPORARY.test(path)
+}
+
 /**
- * True for a source file of the project: a code extension, and not under a `.claude` folder (tool
- * results, memory, plans). A worktree Claude Code made under `.claude/worktrees/` is a project too.
+ * True for a source file of the project: a code extension, not under a `.claude` folder (tool
+ * results, memory, plans) and not in a temporary folder (scratch scripts Claude writes to try
+ * things). A worktree Claude Code made under `.claude/worktrees/` is a project too.
  */
 export function isCode(path: string): boolean {
   const name = basename(path).toLowerCase()
   const dot = name.lastIndexOf('.')
 
-  if (/(^|[\\/])\.claude[\\/]/.test(insideWorktree(path))) {
+  if (/(^|[\\/])\.claude[\\/]/.test(insideWorktree(path)) || isTemporary(path)) {
     return false
   }
 
@@ -488,4 +496,25 @@ export function preferredBranch(found: readonly string[], typed: string): string
   }
 
   return undefined
+}
+
+/**
+ * Where `needle` stands in a line, each a start and an end: any case, unless the needle
+ * has a capital, which then counts (as an editor's smart case does).
+ */
+export function findIn(line: string, needle: string): Array<[start: number, end: number]> {
+  if (needle === '') {
+    return []
+  }
+
+  const isExact = needle !== needle.toLowerCase()
+  const text = isExact ? line : line.toLowerCase()
+  const wanted = isExact ? needle : needle.toLowerCase()
+  const found: Array<[number, number]> = []
+
+  for (let at = text.indexOf(wanted); at >= 0 && found.length < 200; at = text.indexOf(wanted, at + wanted.length)) {
+    found.push([at, at + wanted.length])
+  }
+
+  return found
 }

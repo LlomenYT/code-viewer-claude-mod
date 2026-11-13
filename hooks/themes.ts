@@ -14,6 +14,9 @@ export type Theme = {
   lineNumber: string
   /** The background of the line the person asked for. */
   focusLine: string
+  /** What a search in the file found: the background and the text of each match. */
+  match: string
+  matchText: string
   /** The backgrounds of a diff's added and removed lines. */
   diffAdded: string
   diffRemoved: string
@@ -39,6 +42,8 @@ export const THEMES: Record<string, Theme> = {
     },
     lineNumber: '#636d83',
     focusLine: '#3e4451',
+    match: '#e5c07b',
+    matchText: '#1e222a',
     // Claude Code theme keys: they follow the person's own theme.
     diffAdded: 'diffAdded',
     diffRemoved: 'diffRemoved',
@@ -110,6 +115,8 @@ export function resolveSettings(options: PluginOptions): Settings {
       tokens,
       lineNumber: color(options, 'lineNumberColor') ?? base.lineNumber,
       focusLine: base.focusLine,
+      match: base.match,
+      matchText: base.matchText,
       diffAdded: color(options, 'diffAddedColor') ?? base.diffAdded,
       diffRemoved: color(options, 'diffRemovedColor') ?? base.diffRemoved,
       ...(background === undefined ? {} : { background }),

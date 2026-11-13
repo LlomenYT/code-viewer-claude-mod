@@ -13,10 +13,12 @@ import {
   clean,
   countHunks,
   dirname,
+  findIn,
   fitHunks,
   insideWorktree,
   isAbsolute,
   isCode,
+  isTemporary,
   mentionsOf,
   pageHunks,
   parseChanges,
@@ -469,6 +471,120 @@ export async function note($: Engine, file: string, how: Touched['how'], hunks?:
   })
 }
 
+/** Changed files of a repository told apart around a shell command, and how many one command may add to the list. */
+const DIRTY = 400
+const SHELL_NOTED = 20
+
+/** By repository, its changed and new code files, each with what tells one state of it from the next. */
+export type Dirty = Map<string, Map<string, string>>
+
+/** The changed and new code files under a repository, its submodules' too. */
+async function dirtyUnder($: Engine, root: string, depth: number, found: Map<string, string>): Promise<boolean> {
+  const status = await git($, root, ['status', '--porcelain=v2', '-z', '--untracked-files=all'])
+
+  if (status.error !== undefined) {
+    return false
+  }
+
+  const entries = status.output.split('\0')
+
+  for (let index = 0; index < entries.length && found.size < DIRTY; index += 1) {
+    const entry = entries[index] ?? ''
+    const fields = entry.split(' ')
+    const kind = fields[0]
+    let file: string | undefined
+
+    if (kind === '?') {
+      file = entry.slice(2)
+    } else if (kind === '1') {
+      file = fields.slice(8).join(' ')
+    } else if (kind === '2') {
+      file = fields.slice(9).join(' ')
+      // A renamed file is followed by the name it had.
+      index += 1
+    } else if (kind === 'u') {
+      file = fields.slice(10).join(' ')
+    }
+
+    if (file === undefined || file === '') {
+      continue
+    }
+
+    const path = `${root}/${file}`
+
+    // A submodule with changes inside is a repository of its own.
+    if (kind !== '?' && (fields[2] ?? '').startsWith('S')) {
+      if (depth < 2) {
+        await dirtyUnder($, path, depth + 1, found)
+      }
+
+      continue
+    }
+
+    if (!isCode(path)) {
+      continue
+    }
+
+    const stat = await $.fs.stat(path).catch(() => undefined)
+
+    if (stat?.kind === 'file') {
+      found.set(path, `${stat.mtimeMs}:${stat.size}`)
+    }
+  }
+
+  return true
+}
+
+/**
+ * What git calls changed in the repositories Claude works in: taken before a shell command
+ * and again after it, the two tell which files the command wrote.
+ */
+export async function dirtyFiles($: Engine): Promise<Dirty> {
+  const cwd = (await $.session.cwd()).replace(/\/+$/, '')
+
+  await noteRoot($, cwd)
+
+  const dirty: Dirty = new Map()
+
+  for (const root of new Set([rootOf.get(cwd) ?? cwd, ...(await read($, roots))])) {
+    const found = new Map<string, string>()
+
+    if (await dirtyUnder($, root, 0, found)) {
+      dirty.set(root, found)
+    }
+  }
+
+  return dirty
+}
+
+/**
+ * Remembers the files a shell command changed (`sed -i`, a script, `cat > file`), which no
+ * Edit or Write call names: those git calls changed now and did not, or not as they are, before.
+ */
+export async function noteShellChanges($: Engine, before: Dirty): Promise<void> {
+  const after = await dirtyFiles($)
+  const changed: string[] = []
+
+  for (const [root, files] of after) {
+    const known = before.get(root)
+
+    // A repository first seen now has nothing to be told from.
+    if (known === undefined) {
+      continue
+    }
+
+    for (const [path, state] of files) {
+      if (known.get(path) !== state) {
+        changed.push(path)
+      }
+    }
+  }
+
+  for (const path of changed.slice(0, SHELL_NOTED).reverse()) {
+    await note($, path, 'edited')
+  }
+}
+
 // What git said of a folder, and the last listing: the module's own, gone at a reload.
 const rootOf = new Map<string, string | null>()
 let listing: { key: string; listedAt: number; files: Map<string, string> } | undefined
@@ -480,7 +596,7 @@ let listing: { key: string; listedAt: number; files: Map<string, string> } | und
 export async function noteRoot($: Engine, folder: string): Promise<void> {
   const dir = folder.replace(/\/+$/, '')
 
-  if (!isAbsolute(dir) || /(^|\/)\.claude(\/|$)/.test(insideWorktree(dir)) || rootOf.has(dir)) {
+  if (!isAbsolute(dir) || /(^|\/)\.claude(\/|$)/.test(insideWorktree(dir)) || isTemporary(dir) || rootOf.has(dir)) {
     return
   }
 
@@ -700,6 +816,124 @@ export async function turnPage($: Engine, settings: Settings, first: number): Pr
     typeof page === 'string' ? { ...current, mode: 'empty', message: page } : { ...current, ...page, mode: 'file' },
     basename(current.path),
   )
+}
+
+/** The pane's search-in-file field, and the stops the ring makes before and after it. */
+export const FIND = 'find-in-file'
+export const FIND_UP = 'find-up'
+export const FIND_DOWN = 'find-down'
+/** Lines holding what is searched for that are kept: the rest are counted. */
+const HITS = 2000
+
+/** Brings up the search-in-file field, over the file in view, and gives it the ring. */
+export async function openFind($: Engine): Promise<void> {
+  const current = await read($, view)
+
+  if (current.mode !== 'file' || current.path === undefined) {
+    return say($, current.path === undefined ? 'No file is open: pick one, or type its name.' : 'Search works on the file itself: press f, then e.')
+  }
+
+  if (current.needle === undefined) {
+    await update($, view, shown => ({ ...shown, needle: '' }))
+  }
+
+  await $.ui.focus({ requestId: PANE, key: FIND }).catch(() => undefined)
+}
+
+/** Takes the search-in-file field away, and what it found. */
+export async function closeFind($: Engine): Promise<void> {
+  await update($, view, shown => {
+    const { needle: _needle, hits: _hits, hitCount: _hitCount, hitAt: _hitAt, ...rest } = shown
+
+    return rest
+  })
+  await $.ui.focus({ requestId: PANE, key: 'find-open' }).catch(() => undefined)
+}
+
+/** Brings the hit numbered `at` into view: a page begun just above its line, the line marked. */
+async function goToHit($: Engine, settings: Settings, found: Pick<View, 'needle' | 'hits' | 'hitCount'>, at: number): Promise<void> {
+  const current = await read($, view)
+  const line = found.hits?.[at]
+
+  if (current.path === undefined || current.mode !== 'file') {
+    return
+  }
+
+  if (line === undefined) {
+    await update($, view, shown => {
+      const { hitAt: _hitAt, ...rest } = shown
+
+      return { ...rest, ...found }
+    })
+
+    return
+  }
+
+  // The page begins just above the line, whichever held it before: the field and the count
+  // head the body, so they stay in view beside what they found.
+  const page = await pageOf($, settings, current.path, Math.max(1, line - 3))
+
+  if (typeof page === 'string') {
+    return say($, page)
+  }
+
+  // What was typed since, or another file shown, wins over this slower answer.
+  const latest = await read($, view)
+
+  if (latest.needle !== found.needle || latest.path !== current.path || latest.mode !== 'file') {
+    return
+  }
+
+  await update($, view, shown => {
+    const { message: _message, ...kept } = shown
+
+    return { ...kept, ...page, ...found, hitAt: at, focusLine: line }
+  })
+  await $.ui.scroll({ in: PANE, to: 'start' }).catch(() => undefined)
+}
+
+/** Searches the file in view for what is typed in the field: every line that holds it, and the first from the page shown on. */
+export async function findInFile($: Engine, settings: Settings, typed: string): Promise<void> {
+  const current = await read($, view)
+
+  if (current.path === undefined || current.mode !== 'file' || current.needle === undefined) {
+    return
+  }
+
+  await update($, view, shown => ({ ...shown, needle: typed }))
+
+  const lines = typed === '' ? [] : splitLines(await $.fs.read(current.path).catch(() => ''))
+  const all: number[] = []
+
+  for (const [index, line] of lines.entries()) {
+    if (findIn(line, typed).length > 0) {
+      all.push(index + 1)
+    }
+  }
+
+  // A slower answer for an earlier key must not replace a later one's.
+  if ((await read($, view)).needle !== typed) {
+    return
+  }
+
+  const hits = all.slice(0, HITS)
+  const from = hits.findIndex(line => line >= (current.firstLine ?? 1))
+
+  return goToHit($, settings, { needle: typed, hits, hitCount: all.length }, from < 0 ? 0 : from)
+}
+
+/** The next hit, or the one before: past the last comes the first again. */
+export async function stepFind($: Engine, settings: Settings, by: 1 | -1): Promise<void> {
+  const current = await read($, view)
+  const count = current.hits?.length ?? 0
+
+  if (current.needle === undefined || count === 0) {
+    return
+  }
+
+  const at = ((current.hitAt ?? (by > 0 ? -1 : 0)) + by + count) % count
+
+  return goToHit($, settings, { needle: current.needle, hits: current.hits ?? [], hitCount: current.hitCount ?? count }, at)
 }
 
 export async function showDiff($: Engine, settings: Settings, file: string, kind: 'claude' | 'git', hunks: Hunk[]): Promise<void> {

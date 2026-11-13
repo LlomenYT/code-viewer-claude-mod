@@ -24,13 +24,14 @@ A side pane for [Claude Code](https://claude.com/claude-code) with tabs, fuzzy f
 | | Feature | How it works |
 | --- | --- | --- |
 | 👁 | **One button to open it** | A `👁 code viewer` row sits above the prompt. Click it to open the pane; it steps aside while the pane is open, so `ctrl+x tab` goes straight to the pane. `/code-viewer` opens and closes it too. |
-| 🗂 | **Session files** | The pane lists the code files Claude changed (`±`), read (`▸`) or named in an answer (`·`), latest first. |
+| 🗂 | **Session files** | The pane lists the code files Claude changed (`±`), read (`▸`) or named in an answer (`·`), latest first. Files changed from a shell command (`sed -i`, a script) count too, inside a git repository. |
 | 🔎 | **Fuzzy search** | Type part of a name or path and results appear under the field as you type. `Enter` opens the first; `↓` picks another. |
+| 🔦 | **Search in a file** | Press `e` on a file and type: every match is highlighted, and `Enter`, `↓` and `↑` jump between them across the whole file. |
 | 📑 | **Tabs** | Every file you open stays as a tab (up to nine). Hover a tab to get a red `×`, or press `w`. |
 | 🎨 | **Syntax highlighting** | JavaScript, TypeScript, JSX/TSX, Python, JSON, YAML and Markdown use a themeable highlighter. Other languages use Claude Code's own. |
 | 🧩 | **Claude's diff** | See exactly what Claude changed in a file, block by block, with `Added N lines, removed M lines` headers. |
 | 🌿 | **Git diff against a branch** | Pick a base such as `origin/dev` and see only your own changes: the file is compared with the commit your branch forked from. |
-| 🧭 | **Works across repositories** | If Claude works in another repository or a sandbox folder, its files are indexed and searchable too. |
+| 🧭 | **Works across repositories** | If Claude works in another repository or a sandbox folder, its files are indexed and searchable too. Scratch files in temporary folders (`/tmp`, `/var/folders`) are left out. |
 
 ## 📦 Install
 
@@ -80,6 +81,7 @@ You can also open things straight from the conversation:
 | `f` / `c` / `g` | File / Claude's diff / git diff |
 | `b` | Choose the branch to diff against |
 | `d` | List every file changed against that branch (`/code-viewer changes` does the same) |
+| `e` | Search in the file in view: `Enter` or `↓` next match, `↑` previous, `Enter` on an emptied field closes it |
 | `p` / `n` | Previous / next page, of a file or of a long git diff |
 | `k` | Clear the session files list (while it is shown) |
 | `m` | Minimize to one line |
