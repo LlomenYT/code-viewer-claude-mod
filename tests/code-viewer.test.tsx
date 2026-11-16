@@ -1523,3 +1523,136 @@ test('a search in the file walks its matches across pages, wraps, and closes on 
   expect(findIn('aaaa', 'aa')).toEqual([[0, 2], [2, 4]])
   expect(findIn('abc', '')).toEqual([])
 })
+
+/** A disk for the HTML export: the plugin's template, files to read, and what is written. */
+const htmlDisk = (on: Parameters<TestBody>[1], onDisk: Record<string, string>, written: Map<string, string>) => {
+  on('session.cwd', () => ({ value: '/project' }))
+  on('session.id', () => ({ value: 's1' }))
+  on('clock.now', () => ({ value: 0 }))
+  on('fs.read', ($, event) => {
+    const path = String((event as { path?: unknown }).path)
+    const text = path.endsWith('/assets/diff-viewer.html')
+      ? '<style>/*__CODE_VIEWER_THEME__*/</style><script>__CODE_VIEWER_DATA__</script>'
+      : (written.get(path) ?? onDisk[path])
+
+    if (text === undefined) {
+      throw new Error('missing')
+    }
+
+    return { value: text }
+  })
+  on('fs.write', ($, event) => {
+    written.set(String((event as { path?: unknown }).path), String((event as { text?: unknown }).text))
+
+    return { value: undefined }
+  })
+  on('fs.stat', ($, event) => {
+    const path = String((event as { path?: unknown }).path)
+
+    if (path === '/project' || path === '/project/app') {
+      return { value: { kind: 'dir' as const, size: 1, mtimeMs: 0, isLink: false } }
+    }
+
+    if (onDisk[path] === undefined) {
+      throw new Error('missing')
+    }
+
+    return { value: { kind: 'file' as const, size: 1, mtimeMs: 0, isLink: false } }
+  })
+}
+
+const dataOf = (html: string | undefined) => JSON.parse(/<script>(.*)<\/script>/s.exec(html ?? '')?.[1] ?? 'null')
+
+test('Claude writes the changes against a branch as an HTML page, colored, and opens it', async ($, on) => {
+  const ran: string[] = []
+  const written = new Map<string, string>()
+  const file = Array.from({ length: 20 }, (_, index) => `x${index + 1} = ${index + 1}`).join('\n')
+
+  htmlDisk(on, { '/project/app/kept.py': `${file}\n`, '/project/app/new.py': 'print("</script>")\n' }, written)
+  gitHooks(
+    on,
+    args => {
+      const line = args.join(' ')
+
+      // `uname -s`, then `open <page>`: git's helper drops the command's own name.
+      return args[0] === '-s'
+        ? { stdout: 'Darwin\n' }
+        : args[0] === 'rev-parse' && args[1] === '--verify'
+        ? { stdout: 'abc\n' }
+        : args[0] === 'rev-parse' && args[1] === '--abbrev-ref'
+          ? { stdout: 'feature\n' }
+          : args[0] === 'rev-parse' && args[1] === '--short'
+            ? { stdout: 'abc\n' }
+            : args[0] === 'merge-base'
+              ? { stdout: 'abc\n' }
+              : line === 'diff -M --name-status -z abc'
+                ? { stdout: 'M\u0000app/kept.py\u0000' }
+                : line === 'diff -M --numstat -z abc'
+                  ? { stdout: '1\t1\tapp/kept.py\u0000' }
+                  : args[0] === 'ls-files'
+                    ? { stdout: 'app/new.py\u0000' }
+                    : args[0] === 'diff' && args[1] === 'abc'
+                      ? { stdout: '@@ -9,3 +9,3 @@\n x9 = 9\n-x10 = 0\n+x10 = 10\n x11 = 11\n' }
+                      : args[0] === 'diff' && args[1] === '--no-index'
+                        ? { stdout: '@@ -0,0 +1 @@\n+print("</script>")\n', exitCode: 1 }
+                        : {}
+    },
+    ran,
+  )
+
+  const result = await $.tool.call({ tool: 'mcp__code-viewer__html_diff', base: 'origin/dev', language: 'es' } as never)
+  const page = written.get('/tmp/code-viewer/changes-feature-vs-origin-dev.html')
+  const data = dataOf(page)
+
+  expect(String((result as { result?: unknown }).result)).toContain('2 files, +2 −1')
+  expect(ran).toContain('/tmp/code-viewer/changes-feature-vs-origin-dev.html')
+  expect(data.title).toBe('Cambios respecto a origin/dev')
+  expect(data.files.map((entry: { p: string; m: string }) => `${entry.m} ${entry.p}`)).toEqual(['M app/kept.py', '? app/new.py'])
+  // The file whole, colored, for the unchanged lines a click opens; removed lines carry their own.
+  expect(data.files[0].l).toHaveLength(20)
+  expect(data.files[0].l[9]).toBe('x10 <i class=p>= </i><i class=n>10</i>')
+  expect(data.files[0].h[0].r[1]).toEqual(['-', 10, 0, 'x10 <i class=p>= </i><i class=n>0</i>'])
+  expect(data.files[0].h[0].r[2]).toEqual(['+', 0, 10])
+  // A closing tag in the code cannot end the page's script.
+  expect(page?.includes('</script>")')).toBe(false)
+  expect(page).toContain('i.k{color:#c678dd}')
+})
+
+test('the session page diffs each file against how it was before Claude first changed it', async ($, on) => {
+  const ran: string[] = []
+  const written = new Map<string, string>()
+  const onDisk: Record<string, string> = { '/project/app/a.py': 'a = 1\n' }
+
+  htmlDisk(on, onDisk, written)
+  gitHooks(
+    on,
+    args =>
+      args[0] === 'diff' && args[1] === '--no-index'
+        ? { stdout: args.includes('/dev/null') ? '@@ -0,0 +1 @@\n+b = 1\n' : '@@ -1 +1 @@\n-a = 1\n+a = 2\n', exitCode: 1 }
+        : {},
+    ran,
+  )
+  on('tool.call', ($, event) => ({ result: { filePath: String((event as { file_path?: unknown }).file_path) } }) as never)
+  on('command.run', () => ({ text: '' }))
+
+  await $.tool.call({ tool: 'Edit', file_path: '/project/app/a.py', old_string: '1', new_string: '2' } as never)
+  onDisk['/project/app/a.py'] = 'a = 2\n'
+  await $.tool.call({ tool: 'Edit', file_path: '/project/app/a.py', old_string: '2', new_string: '3' } as never)
+  await $.tool.call({ tool: 'Write', file_path: '/project/app/b.py', content: 'b = 1\n' } as never)
+  onDisk['/project/app/b.py'] = 'b = 1\n'
+
+  // The first snapshot stands: the second Edit keeps it.
+  expect(written.get('/tmp/code-viewer-snapshots/s1/0-a.py')).toBe('a = 1\n')
+  expect(JSON.parse(written.get('/tmp/code-viewer-snapshots/s1/index.json') ?? '{}')).toEqual({
+    '/project/app/a.py': '0-a.py',
+    '/project/app/b.py': null,
+  })
+
+  const { text } = await $.command.run({ command: 'code-viewer', args: 'html session', presentation: { isFullscreen: false } } as never)
+  const data = dataOf(written.get('/tmp/code-viewer/session-project.html'))
+
+  expect(text).toContain('2 files, +2 −1')
+  expect(ran).toContain('diff --no-index --no-color --no-ext-diff -U3 -- /tmp/code-viewer-snapshots/s1/0-a.py /project/app/a.py')
+  expect(data.source).toBe('session')
+  expect(data.files.map((entry: { p: string; m: string }) => `${entry.m} ${entry.p}`)).toEqual(['M app/a.py', 'A app/b.py'])
+})

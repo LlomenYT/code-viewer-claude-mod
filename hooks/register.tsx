@@ -47,6 +47,8 @@ import {
   typing,
 } from './actions'
 import { basename, clean, dirname, findIn, hunksOf, mentionsOf, relative, shortOf, unified } from './files'
+import { htmlConfigOf, snapshotBefore, writeHtmlDiff } from './html'
+import type { HtmlRequest } from './html'
 import { resolveSettings } from './themes'
 import { languageOf, stateAfter, tokenizeLine } from './tokenize'
 import type { Kind, Span } from './tokenize'
@@ -63,6 +65,30 @@ const diffBase = atom({ plugin: 'code-viewer', key: 'base' } as const, '')
 const promptTurn = atom({ plugin: 'code-viewer', key: 'turn' } as const, 0)
 
 const FILE_TOOLS = new Set(['Read', 'Edit', 'Write', 'MultiEdit'])
+const WRITE_TOOLS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit'])
+// A RegExp: the tool's name joins the generated types only once the mod has loaded with it.
+const HTML_TOOL = /^mcp__code-viewer__html_diff$/
+const HTML_SCHEMA = {
+  type: 'object',
+  properties: {
+    source: {
+      type: 'string',
+      enum: ['git', 'session'],
+      description: 'git: every file changed against a base branch, from where the branch forked it, uncommitted and untracked included (the default). session: every file Claude changed this session, against how it was before.',
+    },
+    base: {
+      type: 'string',
+      description: 'git: the branch, tag or commit to compare with (origin/dev, main, HEAD for the uncommitted changes). Part of a branch name is enough. Left out: the base picked in the code pane.',
+    },
+    title: { type: 'string', description: "The page's title. Left out: \"Changes against <base>\" or \"Claude's changes this session\"." },
+    paths: { type: 'array', items: { type: 'string' }, description: 'Only the files whose path contains one of these (folders or names).' },
+    folder: { type: 'string', description: 'git: a folder inside the repository to diff. Left out: the working directory.' },
+    output: { type: 'string', description: 'The .html file to write. Left out: a file under the htmlOutputDir option (/tmp/code-viewer).' },
+    open: { type: 'boolean', description: 'Open the page in the browser once written. Left out: the htmlOpen option (true).' },
+    context: { type: 'integer', minimum: 0, maximum: 50, description: 'Unchanged lines shown around each change; the rest open with a click. Left out: the htmlContext option (3).' },
+    language: { type: 'string', enum: ['en', 'es'], description: "The page's own labels. Use the language of the conversation." },
+  },
+} as const
 const SEARCH_TOOLS = new Set(['Grep', 'Glob'])
 // A drawn tree may hold 20,000 nodes: past this many colored spans, lines are drawn plain.
 const MAX_COLORED_SPANS = 2500
@@ -71,6 +97,7 @@ const CHANGE_COLORS = { A: 'success', M: 'warning', D: 'error', R: 'suggestion',
 
 export const register: Register = (on, options) => {
   const settings = resolveSettings(options)
+  const htmlConfig = htmlConfigOf(options)
   const { theme } = settings
   // The pane's element the ring is on, as its moves tell; and the stop a move to which was
   // answered with a step through the search's hits, whose press (a click's) must not step again.
@@ -95,8 +122,15 @@ export const register: Register = (on, options) => {
     await $.command.register({
       name: 'code-viewer',
       description: 'Open a file, or its diff, in the code pane',
-      argumentHint: '[diff] [file[:line] | search words] | changes',
+      argumentHint: '[diff] [file[:line] | search words] | changes | html [session | base]',
       immediate: true,
+    })
+    await $.tool.register({
+      name: 'html_diff',
+      description:
+        'Writes the diff as a page for the browser and opens it: a file tree with counts, syntax highlighting, unchanged lines that open with a click, search in every diff and in a file, keys to step between files and changes. Use it when the person asks to see changes (against a branch, or Claude\'s of this session) in the browser or as HTML. Answers the path of the page.',
+      inputSchema: HTML_SCHEMA,
+      isDeferred: false,
     })
 
     return next(event)
@@ -114,11 +148,50 @@ export const register: Register = (on, options) => {
       return { text: await showChanges($, paneSettings) }
     }
 
+    // The same as a page in the browser: `html`, `html session`, `html origin/dev`.
+    const html = /^html(?:\s+(.*))?$/s.exec(event.args.trim())
+
+    if (html !== null) {
+      const what = (html[1] ?? '').trim()
+      const request: HtmlRequest = what === 'session' ? { source: 'session' } : what === '' ? {} : { base: what }
+
+      return { text: (await writeHtmlDiff($, settings, htmlConfig, request)).text }
+    }
+
     return { text: await find($, paneSettings, event.args) }
+  })
+
+  // The tool Claude calls to write the diff as a page.
+  on('tool.call', { tool: HTML_TOOL }, async ($, event) => {
+    // A tool call carries its input on the event itself.
+    const input = event as unknown as Record<string, unknown>
+    const text = (key: string) => (typeof input[key] === 'string' ? (input[key] as string) : undefined)
+    const paths = Array.isArray(input.paths) ? input.paths.filter((path): path is string => typeof path === 'string') : undefined
+    const request: HtmlRequest = {
+      ...(input.source === 'session' || input.source === 'git' ? { source: input.source } : {}),
+      ...(text('base') === undefined ? {} : { base: text('base') }),
+      ...(text('title') === undefined ? {} : { title: text('title') }),
+      ...(text('folder') === undefined ? {} : { folder: text('folder') }),
+      ...(text('output') === undefined ? {} : { output: text('output') }),
+      ...(paths === undefined ? {} : { paths }),
+      ...(typeof input.open === 'boolean' ? { open: input.open } : {}),
+      ...(typeof input.context === 'number' ? { context: input.context } : {}),
+      ...(input.language === 'es' || input.language === 'en' ? { language: input.language } : {}),
+    }
+    const written = await writeHtmlDiff($, settings, htmlConfig, request)
+
+    return { result: written.text, ...(written.isError === true ? { isError: true as const } : {}) }
   })
 
   // The session's files: what Claude read or changed, as each call ends.
   on('tool.call', async ($, event, next) => {
+    const target = (event as { file_path?: unknown; notebook_path?: unknown }).file_path ?? (event as { notebook_path?: unknown }).notebook_path
+
+    // The file as it was before Claude's first change of it: the session's HTML diff is against it.
+    if (WRITE_TOOLS.has(event.tool) && typeof target === 'string') {
+      await snapshotBefore($, target).catch(() => undefined)
+    }
+
     // A shell command names no file it writes: what git calls changed, before and after, tells them.
     const before = event.tool === 'Bash' ? await dirtyFiles($).catch(() => undefined) : undefined
     const result = await next(event)
@@ -916,7 +989,7 @@ export const register: Register = (on, options) => {
     const noFile = 'No file is open: pick one, or type its name.'
     const idleKeys: Array<[hotkey: string, message: string]> = [
       ...(current.isCollapsed === true
-        ? (['f', 'c', 'g', 'b', 'w', 'n', 'p', 's', 'l', 'd', 'k', 'e', ...'123456789'].map(key => [key, '']) as Array<[string, string]>)
+        ? (['f', 'c', 'g', 'b', 'w', 'n', 'p', 's', 'l', 'd', 'k', 'e', 'h', ...'123456789'].map(key => [key, '']) as Array<[string, string]>)
         : [
             ...(path === undefined
               ? ((current.mode === 'changes' ? ['f', 'g', 'w'] : ['f', 'g', 'b', 'w']).map(key => [key, noFile]) as Array<[string, string]>)
@@ -1054,6 +1127,20 @@ export const register: Register = (on, options) => {
           {choice('mode-changes', 'd', 'changes', current.mode === 'changes', async () => {
             await showChanges($, paneSettings)
           })}
+          {choice(
+            'html',
+            'h',
+            'html',
+            false,
+            async () => {
+              // The git changes where git is what is shown, with a base picked; else Claude's of the session.
+              const isGit = baseBranch !== '' && (current.mode === 'changes' || (current.mode === 'diff' && current.diffKind === 'git'))
+
+              await say($, isGit ? `Writing the changes against ${clean(baseBranch)} as HTML…` : "Writing Claude's changes of the session as HTML…")
+              await say($, (await writeHtmlDiff($, settings, htmlConfig, isGit ? { source: 'git' } : { source: 'session' })).text.replace(/^Code viewer: /, ''))
+            },
+            true,
+          )}
         </Box>
         <Box flexDirection="row" columnGap={2} flexWrap="wrap">
           {choice(

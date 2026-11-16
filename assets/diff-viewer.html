@@ -1,0 +1,622 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Code Viewer diff</title>
+<!--
+  Code Viewer for Claude Code: the HTML diff template.
+  The mod writes the diff as JSON into the <script id="cv-data"> at the end (its one marker,
+  named nowhere else in the file) and the theme's colors over the comment in the second <style>. Copy this file, change it, and point the plugin's
+  `htmlTemplate` option at the copy to use your own.
+-->
+<style>
+:root {
+  --bg: #1e2227;
+  --panel: #21252b;
+  --panel-2: #282c34;
+  --border: #181a1f;
+  --text: #abb2bf;
+  --dim: #7f848e;
+  --bright: #e6e6e6;
+  --accent: #61afef;
+  --selected: #2c3a52;
+  --line-number: #636d83;
+  --added-bg: rgba(87, 171, 90, 0.16);
+  --added-gutter: rgba(87, 171, 90, 0.26);
+  --removed-bg: rgba(229, 83, 75, 0.16);
+  --removed-gutter: rgba(229, 83, 75, 0.26);
+  --gap-bg: #252a33;
+  --match: #e5c07b;
+  --match-text: #1e222a;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; }
+body { background: var(--bg); color: var(--text); font: 14px/1.5 var(--sans); display: flex; flex-direction: column; overflow: hidden; }
+button { font: inherit; color: inherit; background: none; border: 0; cursor: pointer; }
+input { font: 13px var(--mono); color: var(--bright); background: var(--bg); border: 1px solid #3a3f4b; border-radius: 4px; padding: 6px 10px; width: 100%; outline: none; }
+input:focus { border-color: var(--accent); }
+.dim { color: var(--dim); }
+
+header { display: flex; align-items: baseline; gap: 14px; padding: 9px 14px; background: var(--panel); border-bottom: 1px solid var(--border); white-space: nowrap; }
+header h1 { font-size: 15px; margin: 0; color: var(--bright); font-weight: 600; }
+header .sub { color: var(--dim); overflow: hidden; text-overflow: ellipsis; flex: 1; min-width: 0; }
+header .stats { color: var(--dim); }
+header .toggle { color: var(--dim); border: 1px solid #3a3f4b; border-radius: 4px; padding: 1px 8px; font-size: 12px; }
+header .toggle.on { color: var(--bright); border-color: var(--accent); }
+
+.main { flex: 1; display: flex; min-height: 0; }
+aside { width: 340px; min-width: 200px; max-width: 60vw; resize: horizontal; overflow: hidden; display: flex; flex-direction: column; background: var(--panel); border-right: 1px solid var(--border); }
+.tabs { display: flex; border-bottom: 1px solid var(--border); }
+.tabs button { flex: 1; padding: 9px; color: var(--dim); border-bottom: 2px solid transparent; }
+.tabs button.on { color: var(--bright); border-bottom-color: var(--accent); }
+.pane { display: none; flex: 1; min-height: 0; flex-direction: column; }
+.pane.on { display: flex; }
+.field { padding: 8px; border-bottom: 1px solid var(--border); }
+.list { flex: 1; overflow: auto; padding: 4px 0 12px; font-size: 13.5px; }
+.group { display: flex; align-items: center; gap: 6px; padding: 3px 8px; color: var(--dim); cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; user-select: none; }
+.group:hover { color: var(--text); }
+.group .caret { display: inline-block; width: 10px; font-size: 11px; transition: transform .1s; }
+.group.closed .caret { transform: rotate(-90deg); }
+.file { display: flex; align-items: center; gap: 10px; padding: 3px 10px 3px 28px; cursor: pointer; white-space: nowrap; }
+.file:hover { background: #2a2f38; }
+.file.on { background: var(--selected); color: var(--bright); }
+.file .name { flex: 1; overflow: hidden; text-overflow: ellipsis; }
+.mark { font: 600 11px var(--mono); width: 10px; text-align: center; }
+.mark-A, .mark-\? { color: #98c379; }
+.mark-M { color: var(--accent); }
+.mark-D { color: #e06c75; }
+.mark-R { color: #c678dd; }
+.counts { font: 12px var(--mono); }
+.plus { color: #98c379; }
+.minus { color: #e06c75; }
+.result-file { padding: 6px 10px 2px; color: var(--bright); font-size: 12.5px; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.result { display: flex; gap: 8px; padding: 1px 10px 1px 18px; font: 12.5px var(--mono); cursor: pointer; white-space: pre; overflow: hidden; }
+.result:hover { background: #2a2f38; }
+.result .no { color: var(--line-number); min-width: 34px; text-align: right; }
+.result .snip { overflow: hidden; text-overflow: ellipsis; }
+.note { padding: 8px 12px; color: var(--dim); font-size: 12.5px; }
+
+section { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.filebar { display: flex; align-items: center; gap: 12px; padding: 8px 14px; background: var(--panel-2); border-bottom: 1px solid var(--border); white-space: nowrap; }
+.filebar .path { font: 14px var(--mono); color: var(--bright); overflow: hidden; text-overflow: ellipsis; flex: 1; min-width: 0; direction: rtl; text-align: left; }
+.filebar .path bdi { direction: ltr; }
+.filebar .about { color: #e5c07b; font-size: 12.5px; }
+.filebar .nav button { border: 1px solid #3a3f4b; border-radius: 4px; padding: 1px 9px; color: var(--dim); font-size: 12.5px; }
+.filebar .nav button:hover { color: var(--bright); }
+.findbar { display: none; align-items: center; gap: 8px; padding: 6px 14px; background: var(--panel); border-bottom: 1px solid var(--border); }
+.findbar.on { display: flex; }
+.findbar input { max-width: 360px; }
+.findbar .count { color: var(--dim); font-size: 12.5px; min-width: 70px; }
+.findbar button { color: var(--dim); padding: 0 6px; }
+.findbar button:hover { color: var(--bright); }
+.scroller { flex: 1; overflow: auto; }
+.empty { padding: 40px; color: var(--dim); }
+
+table.diff { border-collapse: collapse; width: 100%; font: 13.5px/1.6 var(--mono); tab-size: 4; }
+table.diff td { padding: 0; vertical-align: top; }
+td.no { width: 1%; min-width: 52px; padding: 0 10px !important; text-align: right; color: var(--line-number); user-select: none; border-right: 1px solid #2d323b; }
+td.sign { width: 26px; padding-left: 10px !important; user-select: none; color: var(--dim); }
+td.code { white-space: pre; padding-right: 24px !important; }
+body.wrap td.code { white-space: pre-wrap; overflow-wrap: anywhere; }
+tr.add td.code, tr.add td.sign { background: var(--added-bg); }
+tr.add td.no { background: var(--added-gutter); }
+tr.del td.code, tr.del td.sign { background: var(--removed-bg); }
+tr.del td.no { background: var(--removed-gutter); }
+tr.gap td { background: var(--gap-bg); color: var(--accent); text-align: center; cursor: pointer; font-size: 12.5px; padding: 3px 0 !important; user-select: none; }
+tr.gap:hover td { color: var(--bright); }
+tr.info td { color: var(--dim); padding: 14px 20px !important; font-family: var(--sans); }
+tr.flash td { animation: flash 1.4s ease-out; }
+@keyframes flash { from { box-shadow: inset 0 0 0 999px rgba(229, 192, 123, .35); } to { box-shadow: none; } }
+/* Tokens are <i class=k>: the theme's rules (i.k, i.c …) color them. */
+i { font-style: normal; }
+mark { background: var(--match); color: var(--match-text); border-radius: 2px; }
+mark.current { outline: 2px solid #fff; }
+.result mark { padding: 0; }
+
+footer { display: flex; flex-wrap: wrap; gap: 4px 18px; padding: 6px 14px; background: var(--panel); border-top: 1px solid var(--border); color: var(--dim); font-size: 12.5px; }
+kbd { font: 11.5px var(--mono); color: var(--bright); background: #2c313a; border: 1px solid #3a3f4b; border-radius: 3px; padding: 0 5px; margin-right: 4px; }
+::-webkit-scrollbar { width: 11px; height: 11px; }
+::-webkit-scrollbar-thumb { background: #3a3f4b; border-radius: 6px; border: 2px solid transparent; background-clip: padding-box; }
+::-webkit-scrollbar-corner { background: transparent; }
+</style>
+<style>
+/*__CODE_VIEWER_THEME__*/
+</style>
+</head>
+<body class="wrap">
+<header>
+  <h1 id="title"></h1>
+  <span class="sub" id="sub"></span>
+  <span class="stats" id="stats"></span>
+  <button class="toggle on" id="wrap"></button>
+</header>
+<div class="main">
+  <aside>
+    <div class="tabs">
+      <button class="on" data-tab="files" id="tab-files"></button>
+      <button data-tab="search" id="tab-search"></button>
+    </div>
+    <div class="pane on" id="pane-files">
+      <div class="field"><input id="filter" autocomplete="off" spellcheck="false"></div>
+      <div class="list" id="tree"></div>
+    </div>
+    <div class="pane" id="pane-search">
+      <div class="field"><input id="search" autocomplete="off" spellcheck="false"></div>
+      <div class="list" id="results"></div>
+    </div>
+  </aside>
+  <section>
+    <div class="filebar" id="filebar">
+      <span class="mark" id="file-mark"></span>
+      <span class="path"><bdi id="file-path"></bdi></span>
+      <span class="about" id="file-about"></span>
+      <span class="counts" id="file-counts"></span>
+      <span class="nav"><button id="prev-change"></button> <button id="next-change"></button></span>
+    </div>
+    <div class="findbar" id="findbar">
+      <input id="find" autocomplete="off" spellcheck="false">
+      <span class="count" id="find-count"></span>
+      <button id="find-prev" title="Shift+Enter">↑</button>
+      <button id="find-next" title="Enter">↓</button>
+      <button id="find-close" title="Esc">✕</button>
+    </div>
+    <div class="scroller" id="scroller"></div>
+  </section>
+</div>
+<footer id="keys"></footer>
+
+<script id="cv-data" type="application/json">__CODE_VIEWER_DATA__</script>
+<script>
+(() => {
+  'use strict'
+  const data = JSON.parse(document.getElementById('cv-data').textContent)
+  const TEXT = {
+    en: {
+      files: 'Files', search: 'Search', filter: 'Filter files (Ctrl+P)', searchAll: 'Search every diff (Ctrl+Shift+F)',
+      findIn: 'Find in file', wrap: 'wrap', filesCount: n => `${n} ${n === 1 ? 'file' : 'files'}`,
+      of: (shown, total) => `showing ${shown} of ${total}`, base: 'base', branch: 'branch',
+      prevChange: '↑ change', nextChange: '↓ change', unchanged: n => `⋯ ${n} unchanged ${n === 1 ? 'line' : 'lines'} (click to show)`,
+      binary: 'Binary file: no lines to show.', noLines: 'No lines changed.', renamed: from => `renamed from ${from}`,
+      results: (n, more) => `${n}${more ? '+' : ''} ${n === 1 ? 'match' : 'matches'}`, noResults: 'No matches.', typeMore: 'Type at least 2 characters.',
+      noFile: 'Pick a file on the left.', generated: 'generated',
+      keys: [['Ctrl+P', 'files'], ['Ctrl+Shift+F', 'search everywhere'], ['Ctrl+F', 'find in file'], ['Alt+↑/↓', 'previous/next file'], ['N / Shift+N', 'next/previous change'], ['W', 'wrap lines']],
+      notes: { 'new file': 'new file', 'new file, untracked': 'new file, untracked', deleted: 'deleted', 'changed by a shell command: against the last commit': 'changed by a shell command: against the last commit' },
+    },
+    es: {
+      files: 'Ficheros', search: 'Buscar', filter: 'Filtrar ficheros (Ctrl+P)', searchAll: 'Buscar en todos los cambios (Ctrl+Shift+F)',
+      findIn: 'Buscar en el fichero', wrap: 'ajustar', filesCount: n => `${n} ${n === 1 ? 'fichero' : 'ficheros'}`,
+      of: (shown, total) => `mostrando ${shown} de ${total}`, base: 'base', branch: 'rama',
+      prevChange: '↑ cambio', nextChange: '↓ cambio', unchanged: n => `⋯ ${n} ${n === 1 ? 'línea' : 'líneas'} sin cambios (clic para ver)`,
+      binary: 'Fichero binario: no hay líneas que mostrar.', noLines: 'Sin líneas cambiadas.', renamed: from => `renombrado desde ${from}`,
+      results: (n, more) => `${n}${more ? '+' : ''} ${n === 1 ? 'resultado' : 'resultados'}`, noResults: 'Sin resultados.', typeMore: 'Escribe al menos 2 caracteres.',
+      noFile: 'Elige un fichero a la izquierda.', generated: 'generado',
+      keys: [['Ctrl+P', 'ficheros'], ['Ctrl+Shift+F', 'buscar en todo'], ['Ctrl+F', 'buscar en fichero'], ['Alt+↑/↓', 'fichero anterior/siguiente'], ['N / Shift+N', 'cambio siguiente/anterior'], ['W', 'ajustar líneas']],
+      notes: { 'new file': 'fichero nuevo', 'new file, untracked': 'fichero nuevo, sin seguimiento', deleted: 'borrado', 'changed by a shell command: against the last commit': 'cambiado por un comando: respecto al último commit' },
+    },
+  }
+  const t = TEXT[data.language] || TEXT.en
+  const $ = id => document.getElementById(id)
+  const el = (tag, className, text) => {
+    const node = document.createElement(tag)
+    if (className) node.className = className
+    if (text !== undefined) node.textContent = text
+    return node
+  }
+  const plain = html => html.replace(/<[^>]*>/g, '').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&')
+  const dirOf = path => (path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '')
+  const nameOf = path => path.slice(path.lastIndexOf('/') + 1)
+
+  // ------------------------------------------------------------------ header and static text
+  document.title = data.title
+  $('title').textContent = data.title
+  const sub = []
+  if (data.source === 'git') {
+    if (data.branch) sub.push(data.branch)
+    sub.push(`${t.base} ${data.base}${data.fork && !data.base.startsWith(data.fork) ? ` ${data.fork}` : ''}`)
+  }
+  if (data.repository) sub.push(data.repository)
+  if (data.generatedAt) sub.push(`${t.generated} ${new Date(data.generatedAt).toLocaleString(data.language)}`)
+  $('sub').textContent = sub.join(' · ')
+  $('stats').innerHTML = ''
+  $('stats').append(
+    t.filesCount(data.total) + (data.total > data.files.length ? ` (${t.of(data.files.length, data.total)})` : '') + ' · ',
+    el('span', 'plus', `+${data.added}`), ' ', el('span', 'minus', `−${data.removed}`),
+  )
+  $('tab-files').textContent = t.files
+  $('tab-search').textContent = t.search
+  $('filter').placeholder = t.filter
+  $('search').placeholder = t.searchAll
+  $('find').placeholder = t.findIn
+  $('prev-change').textContent = t.prevChange
+  $('next-change').textContent = t.nextChange
+  for (const [key, what] of t.keys) {
+    const item = el('span')
+    item.append(el('kbd', '', key), what)
+    $('keys').append(item)
+  }
+
+  // ------------------------------------------------------------------ files, in tree order
+  const files = data.files
+    .map((file, index) => ({ ...file, index, dir: dirOf(file.p), name: nameOf(file.p) }))
+    .sort((a, b) => (a.dir === b.dir ? (a.name < b.name ? -1 : 1) : a.dir < b.dir ? -1 : 1))
+  const byPath = new Map(files.map(file => [file.p, file]))
+  const closed = new Set()
+  let current
+  let visible = files
+
+  function counts(file) {
+    const span = el('span', 'counts')
+    if (file.b) span.append(el('span', 'dim', 'bin'))
+    else span.append(el('span', 'plus', `+${file.a}`), ' ', el('span', 'minus', `−${file.r}`))
+    return span
+  }
+
+  function drawTree() {
+    const words = $('filter').value.toLowerCase().split(/\s+/).filter(Boolean)
+    visible = files.filter(file => words.every(word => file.p.toLowerCase().includes(word)))
+    const tree = $('tree')
+    tree.textContent = ''
+    let dir
+    for (const file of visible) {
+      if (file.dir !== dir) {
+        dir = file.dir
+        const group = el('div', `group${closed.has(dir) && words.length === 0 ? ' closed' : ''}`)
+        group.append(el('span', 'caret', '▾'), dir || '.')
+        group.title = dir
+        const which = dir
+        group.onclick = () => { closed.has(which) ? closed.delete(which) : closed.add(which); drawTree() }
+        tree.append(group)
+      }
+      if (closed.has(dir) && words.length === 0) continue
+      const row = el('div', `file${file === current ? ' on' : ''}`)
+      row.dataset.path = file.p
+      row.title = file.f ? `${file.f} → ${file.p}` : file.p
+      row.append(el('span', `mark mark-${file.m}`, file.m), el('span', 'name', file.name), counts(file))
+      row.onclick = () => open(file)
+      tree.append(row)
+    }
+    if (visible.length === 0) tree.append(el('div', 'note', t.noResults))
+  }
+
+  // ------------------------------------------------------------------ one file's diff
+  const lineHtml = (file, row) => (row[3] !== undefined ? row[3] : file.l ? file.l[row[2] - 1] || '' : '')
+
+  function codeRow(kind, oldNo, newNo, sign, html) {
+    const tr = document.createElement('tr')
+    tr.className = kind
+    if (newNo) tr.dataset.n = newNo
+    if (oldNo) tr.dataset.o = oldNo
+    tr.innerHTML = `<td class="no">${oldNo || ''}</td><td class="no">${newNo || ''}</td><td class="sign">${sign}</td><td class="code">${html}</td>`
+    return tr
+  }
+
+  function gapRow(file, from, to, offset) {
+    const tr = document.createElement('tr')
+    tr.className = 'gap'
+    const td = el('td', '', t.unchanged(to - from + 1))
+    td.colSpan = 4
+    tr.append(td)
+    tr.onclick = () => {
+      const rows = document.createDocumentFragment()
+      for (let n = from; n <= to; n += 1) rows.append(codeRow('ctx', n + offset, n, ' ', file.l[n - 1] || ''))
+      tr.replaceWith(rows)
+      if (findState.needle) runFind(false)
+    }
+    return tr
+  }
+
+  function infoRow(text) {
+    const tr = document.createElement('tr')
+    tr.className = 'info'
+    const td = el('td', '', text)
+    td.colSpan = 4
+    tr.append(td)
+    return tr
+  }
+
+  function draw(file) {
+    const table = el('table', 'diff')
+    const body = document.createElement('tbody')
+    table.append(body)
+    if (file.b) body.append(infoRow(t.binary))
+    else if (file.h.length === 0) body.append(infoRow(t.noLines))
+    let nextNew = 1
+    let nextOld = 1
+    for (const hunk of file.h) {
+      const oldCount = hunk.r.filter(row => row[0] !== '+').length
+      const newCount = hunk.r.filter(row => row[0] !== '-').length
+      // `-12,0` inserts after line 12: the next old line is 13. Likewise for the new side.
+      const firstOld = oldCount > 0 ? hunk.o : hunk.o + 1
+      const firstNew = newCount > 0 ? hunk.s : hunk.s + 1
+      if (file.l && firstNew > nextNew) body.append(gapRow(file, nextNew, firstNew - 1, firstOld - firstNew))
+      nextOld = firstOld + oldCount
+      nextNew = firstNew + newCount
+      let wasChange = false
+      for (const row of hunk.r) {
+        const [sign, oldNo, newNo] = row
+        const kind = sign === '+' ? 'add' : sign === '-' ? 'del' : 'ctx'
+        const tr = codeRow(kind, oldNo, newNo, sign === ' ' ? '' : sign, lineHtml(file, row))
+        const isChange = sign !== ' '
+        if (isChange && !wasChange) tr.classList.add('chunk')
+        wasChange = isChange
+        body.append(tr)
+      }
+    }
+    if (file.l && file.h.length > 0 && nextNew <= file.l.length && !file.b) {
+      body.append(gapRow(file, nextNew, file.l.length, nextOld - nextNew))
+    }
+    return table
+  }
+
+  function open(file, line) {
+    if (!file) return
+    current = file
+    $('file-mark').className = `mark mark-${file.m}`
+    $('file-mark').textContent = file.m
+    $('file-path').textContent = file.p
+    const about = [file.f ? t.renamed(file.f) : '', file.n ? t.notes[file.n] || file.n : ''].filter(Boolean)
+    $('file-about').textContent = about.join(' · ')
+    $('file-counts').textContent = ''
+    $('file-counts').append(counts(file))
+    const scroller = $('scroller')
+    scroller.textContent = ''
+    scroller.append(draw(file))
+    scroller.scrollTop = 0
+    const hash = `#${encodeURIComponent(file.p)}`
+    if (location.hash !== hash) history.replaceState(null, '', hash)
+    for (const row of document.querySelectorAll('#tree .file')) row.classList.toggle('on', row.dataset.path === file.p)
+    document.querySelector('#tree .file.on')?.scrollIntoView({ block: 'nearest' })
+    if (findState.needle) runFind(false)
+    if (line) goToLine(line)
+    else {
+      const first = scroller.querySelector('tr.chunk')
+      if (first && first.offsetTop > scroller.clientHeight * 0.6) scroller.scrollTop = first.offsetTop - 80
+    }
+  }
+
+  function goToLine({ n, o }) {
+    const row = $('scroller').querySelector(n ? `tr[data-n="${n}"]:not(.del)` : `tr.del[data-o="${o}"]`)
+    if (!row) return
+    row.scrollIntoView({ block: 'center' })
+    row.classList.remove('flash')
+    void row.offsetWidth
+    row.classList.add('flash')
+  }
+
+  function stepFile(by) {
+    const list = visible.length > 0 ? visible : files
+    const at = list.indexOf(current)
+    open(list[(at + by + list.length) % list.length])
+  }
+
+  function stepChange(by) {
+    const scroller = $('scroller')
+    const chunks = [...scroller.querySelectorAll('tr.chunk')]
+    const top = scroller.scrollTop + 81
+    const target = by > 0 ? chunks.find(row => row.offsetTop > top) : [...chunks].reverse().find(row => row.offsetTop < top - 2)
+    if (target) {
+      scroller.scrollTop = target.offsetTop - 80
+      return
+    }
+    // Past the last change of the file: the next file's first; before its first, the one before.
+    const list = visible.length > 0 ? visible : files
+    if (list.length < 2) return
+    const at = list.indexOf(current)
+    open(list[(at + by + list.length) % list.length])
+    if (by < 0) {
+      const all = [...$('scroller').querySelectorAll('tr.chunk')]
+      const last = all[all.length - 1]
+      if (last) $('scroller').scrollTop = last.offsetTop - 80
+    }
+  }
+
+  // ------------------------------------------------------------------ find in the file
+  const findState = { needle: '', marks: [], at: -1 }
+
+  function markText(cell, needle) {
+    const walker = document.createTreeWalker(cell, NodeFilter.SHOW_TEXT)
+    const nodes = []
+    let text = ''
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+      nodes.push([node, text.length])
+      text += node.data
+    }
+    const lower = text.toLowerCase()
+    const found = []
+    for (let at = lower.indexOf(needle); at >= 0; at = lower.indexOf(needle, at + needle.length)) found.push([at, at + needle.length])
+    const marks = []
+    // From the last match back, so the offsets of the earlier ones still hold.
+    for (const [start, end] of found.reverse()) {
+      const group = []
+      for (let i = nodes.length - 1; i >= 0; i -= 1) {
+        const [node, offset] = nodes[i]
+        const from = Math.max(start, offset)
+        const to = Math.min(end, offset + node.data.length)
+        if (from >= to) continue
+        const range = document.createRange()
+        range.setStart(node, from - offset)
+        range.setEnd(node, to - offset)
+        const mark = document.createElement('mark')
+        range.surroundContents(mark)
+        group.unshift(mark)
+      }
+      marks.unshift(group)
+    }
+    return marks
+  }
+
+  function clearMarks() {
+    for (const mark of $('scroller').querySelectorAll('mark')) mark.replaceWith(...mark.childNodes)
+    for (const cell of $('scroller').querySelectorAll('td.code')) cell.normalize()
+    findState.marks = []
+  }
+
+  function runFind(moves = true) {
+    clearMarks()
+    const needle = $('find').value.toLowerCase()
+    findState.needle = needle
+    if (needle === '') {
+      $('find-count').textContent = ''
+      return
+    }
+    for (const cell of $('scroller').querySelectorAll('td.code')) findState.marks.push(...markText(cell, needle))
+    if (findState.marks.length === 0) {
+      findState.at = -1
+      $('find-count').textContent = '0/0'
+      return
+    }
+    if (moves || findState.at < 0 || findState.at >= findState.marks.length) {
+      const top = $('scroller').scrollTop
+      const index = findState.marks.findIndex(group => group[0].closest('tr').offsetTop >= top)
+      findState.at = index < 0 ? 0 : index
+    }
+    showMatch(moves)
+  }
+
+  function showMatch(scrolls = true) {
+    for (const mark of $('scroller').querySelectorAll('mark.current')) mark.classList.remove('current')
+    const group = findState.marks[findState.at]
+    if (!group) return
+    for (const mark of group) mark.classList.add('current')
+    if (scrolls) group[0].scrollIntoView({ block: 'center' })
+    $('find-count').textContent = `${findState.at + 1}/${findState.marks.length}`
+  }
+
+  function stepFind(by) {
+    if (findState.marks.length === 0) return
+    findState.at = (findState.at + by + findState.marks.length) % findState.marks.length
+    showMatch()
+  }
+
+  function openFind() {
+    $('findbar').classList.add('on')
+    const selected = String(window.getSelection() || '').trim()
+    if (selected && !selected.includes('\n')) $('find').value = selected
+    $('find').focus()
+    $('find').select()
+    runFind()
+  }
+
+  function closeFind() {
+    $('findbar').classList.remove('on')
+    $('find').value = ''
+    findState.needle = ''
+    clearMarks()
+    $('find-count').textContent = ''
+  }
+
+  // ------------------------------------------------------------------ search every diff
+  const MAX_RESULTS = 1000
+  let searchTimer
+
+  function highlight(text, needle) {
+    const span = el('span', 'snip')
+    const lower = text.toLowerCase()
+    let at = 0
+    for (let found = lower.indexOf(needle); found >= 0; found = lower.indexOf(needle, found + needle.length)) {
+      span.append(text.slice(at, found), el('mark', '', text.slice(found, found + needle.length)))
+      at = found + needle.length
+    }
+    span.append(text.slice(at))
+    return span
+  }
+
+  function runSearch() {
+    const needle = $('search').value.toLowerCase()
+    const results = $('results')
+    results.textContent = ''
+    if (needle.length < 2) {
+      results.append(el('div', 'note', t.typeMore))
+      return
+    }
+    let count = 0
+    const fragment = document.createDocumentFragment()
+    outer: for (const file of files) {
+      let header
+      for (const hunk of file.h) {
+        for (const row of hunk.r) {
+          const text = plain(lineHtml(file, row))
+          if (!text.toLowerCase().includes(needle)) continue
+          if (!header) {
+            header = el('div', 'result-file')
+            header.append(el('span', `mark mark-${file.m}`, file.m), ' ', file.p)
+            header.onclick = () => open(file)
+            fragment.append(header)
+          }
+          const item = el('div', 'result')
+          const where = row[0] === '-' ? { o: row[1] } : { n: row[2] }
+          item.append(el('span', 'no', String(row[0] === '-' ? row[1] : row[2])), el('span', row[0] === '+' ? 'plus' : row[0] === '-' ? 'minus' : 'dim', row[0] === ' ' ? ' ' : row[0]), highlight(text.trim(), needle))
+          item.onclick = () => (current === file ? goToLine(where) : open(file, where))
+          fragment.append(item)
+          count += 1
+          if (count >= MAX_RESULTS) break outer
+        }
+      }
+    }
+    results.append(el('div', 'note', count === 0 ? t.noResults : t.results(count, count >= MAX_RESULTS)), fragment)
+  }
+
+  // ------------------------------------------------------------------ wiring
+  function showTab(name) {
+    for (const button of document.querySelectorAll('.tabs button')) button.classList.toggle('on', button.dataset.tab === name)
+    $('pane-files').classList.toggle('on', name === 'files')
+    $('pane-search').classList.toggle('on', name === 'search')
+    const input = name === 'files' ? $('filter') : $('search')
+    input.focus()
+    input.select()
+  }
+
+  for (const button of document.querySelectorAll('.tabs button')) button.onclick = () => showTab(button.dataset.tab)
+  $('filter').oninput = drawTree
+  $('filter').onkeydown = event => {
+    if (event.key === 'Enter' && visible[0]) open(visible[0])
+    if (event.key === 'Escape') { $('filter').value = ''; drawTree(); $('filter').blur() }
+  }
+  $('search').oninput = () => { clearTimeout(searchTimer); searchTimer = setTimeout(runSearch, 180) }
+  $('search').onkeydown = event => { if (event.key === 'Escape') $('search').blur() }
+  $('find').oninput = () => runFind()
+  $('find').onkeydown = event => {
+    if (event.key === 'Enter') { event.preventDefault(); stepFind(event.shiftKey ? -1 : 1) }
+    if (event.key === 'Escape') closeFind()
+  }
+  $('find-prev').onclick = () => stepFind(-1)
+  $('find-next').onclick = () => stepFind(1)
+  $('find-close').onclick = closeFind
+  $('prev-change').onclick = () => stepChange(-1)
+  $('next-change').onclick = () => stepChange(1)
+  const toggleWrap = () => {
+    document.body.classList.toggle('wrap')
+    $('wrap').classList.toggle('on', document.body.classList.contains('wrap'))
+  }
+  $('wrap').textContent = t.wrap
+  $('wrap').onclick = toggleWrap
+
+  document.addEventListener('keydown', event => {
+    const mod = event.ctrlKey || event.metaKey
+    const key = event.key.toLowerCase()
+    const typing = /^(INPUT|TEXTAREA)$/.test(document.activeElement?.tagName || '')
+    if (mod && event.shiftKey && key === 'f') { event.preventDefault(); showTab('search'); return }
+    if (mod && !event.shiftKey && key === 'p') { event.preventDefault(); showTab('files'); return }
+    if (mod && !event.shiftKey && key === 'f') { event.preventDefault(); openFind(); return }
+    if (event.altKey && (event.key === 'ArrowDown' || event.key === 'ArrowUp')) { event.preventDefault(); stepFile(event.key === 'ArrowDown' ? 1 : -1); return }
+    if (typing || mod || event.altKey) return
+    if (key === 'n') { event.preventDefault(); stepChange(event.shiftKey ? -1 : 1) }
+    if (key === 'w') toggleWrap()
+    if (event.key === 'Escape' && $('findbar').classList.contains('on')) closeFind()
+  })
+  window.addEventListener('hashchange', () => {
+    const file = byPath.get(decodeURIComponent(location.hash.slice(1)))
+    if (file && file !== current) open(file)
+  })
+
+  drawTree()
+  const start = byPath.get(decodeURIComponent(location.hash.slice(1))) || files[0]
+  if (start) open(start)
+  else $('scroller').append(el('div', 'empty', t.noFile))
+})()
+</script>
+</body>
+</html>

@@ -952,7 +952,7 @@ export async function showDiff($: Engine, settings: Settings, file: string, kind
   )
 }
 
-async function git(
+export async function git(
   $: Engine,
   cwd: string,
   args: readonly string[],
@@ -1118,7 +1118,7 @@ export async function chooseBase($: Engine, settings: Settings, file: string, ty
 }
 
 /** The nearest folder above `folder` that is on disk, itself included: a deleted file's may be gone. */
-async function existingFolder($: Engine, folder: string): Promise<string> {
+export async function existingFolder($: Engine, folder: string): Promise<string> {
   let dir = folder
 
   for (let step = 0; step < 40 && dir !== '/'; step += 1) {
@@ -1133,7 +1133,7 @@ async function existingFolder($: Engine, folder: string): Promise<string> {
 }
 
 /** The top of the repository a folder lies in, spelled as the folder is; or why there is none. */
-async function repoOf($: Engine, folder: string): Promise<{ root: string } | { error: string }> {
+export async function repoOf($: Engine, folder: string): Promise<{ root: string } | { error: string }> {
   const up = await git($, folder, ['rev-parse', '--show-cdup'])
 
   if (up.error !== undefined) {
@@ -1154,7 +1154,7 @@ async function repoOf($: Engine, folder: string): Promise<{ root: string } | { e
 }
 
 /** The commit the branch left `base` at, run in `root`: `HEAD` for the base `HEAD`. */
-async function forkOf($: Engine, root: string, base: string): Promise<string | undefined> {
+export async function forkOf($: Engine, root: string, base: string): Promise<string | undefined> {
   if (base === 'HEAD') {
     return 'HEAD'
   }

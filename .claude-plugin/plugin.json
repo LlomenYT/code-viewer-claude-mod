@@ -1,9 +1,15 @@
 {
   "name": "code-viewer",
-  "version": "0.0.3",
-  "description": "Code Viewer for Claude Code: open the files and diffs of your session in a side pane, with tabs, fuzzy search and themeable syntax highlighting.",
+  "version": "0.0.4",
+  "description": "Code Viewer for Claude Code: open the files and diffs of your session in a side pane, with tabs, fuzzy search and themeable syntax highlighting, and write them as an HTML page for the browser.",
   "license": "MIT",
-  "keywords": ["pane", "syntax-highlighting", "diff", "viewer"],
+  "keywords": [
+    "pane",
+    "syntax-highlighting",
+    "diff",
+    "viewer",
+    "html"
+  ],
   "types": "./types/index.d.ts",
   "userConfig": {
     "theme": {
@@ -11,14 +17,19 @@
       "title": "Theme",
       "description": "The color theme of the code pane.",
       "default": "one-dark",
-      "options": ["one-dark"]
+      "options": [
+        "one-dark"
+      ]
     },
     "highlighter": {
       "type": "string",
       "title": "Highlighter",
       "description": "theme: the mod's own themeable highlighter where it knows the language, Claude Code's elsewhere. engine: always Claude Code's (its colors are fixed).",
       "default": "theme",
-      "options": ["theme", "engine"]
+      "options": [
+        "theme",
+        "engine"
+      ]
     },
     "wrapLines": {
       "type": "boolean",
@@ -90,6 +101,40 @@
       "type": "string",
       "title": "Removed line background",
       "description": "Overrides the theme. Empty follows your Claude Code theme.",
+      "default": ""
+    },
+    "htmlLanguage": {
+      "type": "string",
+      "title": "HTML diff language",
+      "description": "The labels of the HTML diff page. Claude may pick another per page.",
+      "default": "en",
+      "options": [
+        "en",
+        "es"
+      ]
+    },
+    "htmlOutputDir": {
+      "type": "string",
+      "title": "HTML diff folder",
+      "description": "Where the HTML diff pages are written, absolute or relative to the project.",
+      "default": "/tmp/code-viewer"
+    },
+    "htmlOpen": {
+      "type": "boolean",
+      "title": "Open HTML diffs",
+      "description": "Open each HTML diff page in the browser once written.",
+      "default": true
+    },
+    "htmlContext": {
+      "type": "number",
+      "title": "HTML diff context",
+      "description": "Unchanged lines shown around each change of the HTML diff; the rest open with a click.",
+      "default": 3
+    },
+    "htmlTemplate": {
+      "type": "string",
+      "title": "HTML diff template",
+      "description": "A template of your own: a copy of the plugin's assets/diff-viewer.html, changed. Empty uses the plugin's.",
       "default": ""
     }
   }
