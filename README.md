@@ -8,7 +8,7 @@
 
 A side pane for [Claude Code](https://claude.com/claude-code) with tabs, fuzzy file search, syntax highlighting and clean diffs.
 
-[![Version](https://img.shields.io/badge/version-0.0.4-D97757?style=for-the-badge)](.claude-plugin/plugin.json)
+[![Version](https://img.shields.io/badge/version-0.0.5-D97757?style=for-the-badge)](.claude-plugin/plugin.json)
 [![Claude Code mod](https://img.shields.io/badge/Claude%20Code-mod-D97757?style=for-the-badge&logo=claude&logoColor=white)](https://claude.com/claude-code)
 [![Built with Claude](https://img.shields.io/badge/built%20with-Claude-191919?style=for-the-badge&logo=anthropic&logoColor=white)](https://www.anthropic.com/claude)
 [![License: MIT](https://img.shields.io/badge/license-MIT-2ea44f?style=for-the-badge)](LICENSE)
@@ -17,7 +17,9 @@ A side pane for [Claude Code](https://claude.com/claude-code) with tabs, fuzzy f
 
 ---
 
-> **v0.0.4** writes your diffs as an HTML page for the browser: every file changed against a branch, or every file Claude changed this session, with a file tree, syntax highlighting, search and keys to step through changes. Claude can make one for you when you ask.
+> **v0.0.5** lets you mark files as read in the HTML page, and `/code-viewer html clean` deletes the pages the plugin wrote.
+>
+> **v0.0.4** wrote your diffs as an HTML page for the browser: every file changed against a branch, or every file Claude changed this session, with a file tree, syntax highlighting, search and keys to step through changes. Claude made one for you when you asked.
 >
 > **v0.0.2** added a list of every file changed against a branch, diffs of deleted, new and renamed files, paging of long diffs, stricter base branch matching and many keyboard and highlighting fixes. The Claude Code mod API is early access and can change between releases; this version was written against Claude Code 2.1.322.
 
@@ -77,10 +79,14 @@ Three ways to make one:
 | How | What it writes |
 | --- | --- |
 | Ask Claude: *"show the changes against origin/dev as HTML"*, *"open what you changed this session in the browser"* | Claude calls the plugin's `html_diff` tool, which takes `source` (`git` or `session`), `base`, `title`, `paths` (only some files), `folder`, `output`, `open`, `context` and `language` (`en`, `es`). |
-| `h` in the pane | The changes against the base you picked when the pane shows the git diff or the changes list; otherwise Claude's changes this session. |
-| `/code-viewer html`, `/code-viewer html origin/dev`, `/code-viewer html session` | The changes against the picked base, against the named one, or the session's. |
+| `h` (**view on browser**) in the pane | The changes against the base you picked when the pane shows the git diff or the changes list; otherwise Claude's changes this session. |
+| `/code-viewer html`, `/code-viewer html origin/dev`, `/code-viewer html session` | The changes against the picked base, against the named one, or the session's. `/code-viewer html clean` deletes the pages written so far. |
 
-Keys in the page: `Ctrl+P` files, `Ctrl+Shift+F` search in every diff, `Ctrl+F` find in the file, `Alt+↑`/`Alt+↓` previous or next file, `N`/`Shift+N` next or previous change, `W` wrap lines. The URL keeps the file open (`page.html#src%2Fapp.ts`).
+Keys in the page: `Ctrl+P` files, `Ctrl+Shift+F` search in every diff, `Ctrl+F` find in the file, `Alt+↑`/`Alt+↓` previous or next file, `N`/`Shift+N` next or previous change, `R` mark as read, `W` wrap lines. The URL keeps the file open (`page.html#src%2Fapp.ts`).
+
+**Mark as read:** `✓ Mark as read` (or `R`) closes the file, puts a green tick next to it in the tree and moves on to the next unread file. The header counts how many you have read. A read file opens closed, with a button to show its changes anyway. The marks belong to that page alone and stay in your browser: a page generated again starts with nothing read.
+
+**Cleaning up:** the plugin remembers every page it writes. From 50 pages on, each new one says so and suggests `/code-viewer html clean`, which deletes those pages (only the plugin's, wherever they were written) and the file snapshots of earlier sessions.
 
 For a page of your own, copy `assets/diff-viewer.html`, change it, and set the `htmlTemplate` option to the copy. The plugin puts the diff as JSON in place of `__CODE_VIEWER_DATA__` and the theme's colors in place of `/*__CODE_VIEWER_THEME__*/`.
 
@@ -103,7 +109,7 @@ For a page of your own, copy `assets/diff-viewer.html`, change it, and set the `
 | `f` / `c` / `g` | File / Claude's diff / git diff |
 | `b` | Choose the branch to diff against |
 | `d` | List every file changed against that branch (`/code-viewer changes` does the same) |
-| `h` | Write the diff as an HTML page and open it in the browser |
+| `h` | View on browser: write the diff as an HTML page and open it |
 | `e` | Search in the file in view: `Enter` or `↓` next match, `↑` previous, `Enter` on an emptied field closes it |
 | `p` / `n` | Previous / next page, of a file or of a long git diff |
 | `k` | Clear the session files list (while it is shown) |
@@ -174,6 +180,6 @@ claude plugin test .
 
 <div align="center">
 
-Made for <a href="https://claude.com/claude-code">Claude Code</a> · Code Viewer v0.0.4
+Made for <a href="https://claude.com/claude-code">Claude Code</a> · Code Viewer v0.0.5
 
 </div>

@@ -28,6 +28,11 @@ const FULL_LINES = 20_000
 const LONG_LINE = 5_000
 const DEFAULT_CONTEXT = 3
 const BATCH = 6
+/** The pages written, kept in the plugin's store across sessions: what `html clean` deletes. */
+const PAGES_KEY = 'htmlPages'
+/** From this many pages kept, each new one says how to delete them. */
+const PAGES_WARNING = 50
+const CLEAN_COMMAND = '/code-viewer html clean'
 
 export type HtmlRequest = {
   /** `git`: the changes against a base branch (the default); `session`: Claude's this session. */
@@ -612,11 +617,84 @@ export async function writeHtmlDiff(
     return { text: `Code viewer: could not write ${output}.`, isError: true }
   }
 
+  const pages = await notePage($, output)
   const isOpened = (request.open ?? config.open) ? await openInBrowser($, output) : false
   const count = `${files.length}${total > files.length ? ` of ${total}` : ''} ${total === 1 ? 'file' : 'files'}`
+  const warning =
+    pages >= PAGES_WARNING ? ` ${pages} HTML pages are kept on disk: ${CLEAN_COMMAND} deletes them.` : ''
+
+  if (warning !== '') {
+    $.ui.toast(`Code viewer: ${pages} HTML pages kept. Run ${CLEAN_COMMAND} to delete them.`)
+  }
 
   return {
-    text: `Code viewer: wrote ${output} (${count}, +${payload.added} −${payload.removed})${isOpened ? ', opened in the browser' : ''}.`,
+    text: `Code viewer: wrote ${output} (${count}, +${payload.added} −${payload.removed})${isOpened ? ', opened in the browser' : ''}.${warning}`,
     path: output,
   }
+}
+
+async function isFile($: Engine, path: string): Promise<boolean> {
+  return (await $.fs.stat(path).catch(() => undefined))?.kind === 'file'
+}
+
+/** The pages written and still on disk, as the store keeps them. */
+async function keptPages($: Engine): Promise<string[]> {
+  const stored = await $.store.get(PAGES_KEY).catch(() => undefined)
+  const listed = Array.isArray(stored) ? stored.filter((path): path is string => typeof path === 'string' && path.endsWith('.html')) : []
+  const kept: string[] = []
+
+  for (const path of listed) {
+    if (await isFile($, path)) {
+      kept.push(path)
+    }
+  }
+
+  return kept
+}
+
+/** Adds a page written to the store's list; answers how many it holds. */
+async function notePage($: Engine, output: string): Promise<number> {
+  const pages = [...(await keptPages($)).filter(path => path !== output), output]
+
+  await $.store.set(PAGES_KEY, pages).catch(() => undefined)
+
+  return pages.length
+}
+
+/**
+ * `/code-viewer html clean`: deletes the HTML pages the plugin wrote (only those, as its store
+ * lists them) and the snapshots of other sessions. This session's snapshots stay.
+ */
+export async function cleanHtmlPages($: Engine): Promise<string> {
+  const pages = await keptPages($)
+  let deleted = 0
+
+  for (let at = 0; at < pages.length; at += 50) {
+    const chunk = pages.slice(at, at + 50)
+    const removed = await $.process.run(['rm', '-f', '--', ...chunk], { timeoutMs: 20_000 }).catch(() => undefined)
+
+    if (removed?.exitCode === 0) {
+      deleted += chunk.length
+    }
+  }
+
+  const left = await keptPages($)
+
+  await $.store.set(PAGES_KEY, left).catch(() => undefined)
+
+  // Other sessions' snapshots: each a folder of SNAPSHOTS, named by its session id.
+  const own = basename(await snapshotDir($))
+  const others = (await $.fs.list(SNAPSHOTS).catch(() => []))
+    .filter(entry => entry.kind === 'dir' && entry.name !== own && /^[\w-]+$/.test(entry.name))
+    .map(entry => `${SNAPSHOTS}/${entry.name}`)
+
+  if (others.length > 0) {
+    await $.process.run(['rm', '-rf', '--', ...others], { timeoutMs: 20_000 }).catch(() => undefined)
+  }
+
+  const snapshots = others.length > 0 ? `, and the snapshots of ${others.length} earlier ${others.length === 1 ? 'session' : 'sessions'}` : ''
+
+  return pages.length === 0 && others.length === 0
+    ? 'Code viewer: no HTML pages to delete.'
+    : `Code viewer: deleted ${deleted} HTML ${deleted === 1 ? 'page' : 'pages'}${snapshots}.${left.length > 0 ? ` ${left.length} could not be deleted.` : ''}`
 }

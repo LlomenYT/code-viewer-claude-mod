@@ -1553,7 +1553,7 @@ const htmlDisk = (on: Parameters<TestBody>[1], onDisk: Record<string, string>, w
       return { value: { kind: 'dir' as const, size: 1, mtimeMs: 0, isLink: false } }
     }
 
-    if (onDisk[path] === undefined) {
+    if (onDisk[path] === undefined && !written.has(path)) {
       throw new Error('missing')
     }
 
@@ -1655,4 +1655,76 @@ test('the session page diffs each file against how it was before Claude first ch
   expect(ran).toContain('diff --no-index --no-color --no-ext-diff -U3 -- /tmp/code-viewer-snapshots/s1/0-a.py /project/app/a.py')
   expect(data.source).toBe('session')
   expect(data.files.map((entry: { p: string; m: string }) => `${entry.m} ${entry.p}`)).toEqual(['M app/a.py', 'A app/b.py'])
+})
+
+test('from 50 pages kept, a new one says how to delete them, and html clean deletes only the plugin\'s', async ($, on) => {
+  const ran: string[] = []
+  const written = new Map<string, string>()
+  const onDisk: Record<string, string> = { '/project/app/a.py': 'a = 1\n' }
+  const old = Array.from({ length: 49 }, (_, index) => `/tmp/code-viewer/old-${index}.html`)
+
+  for (const page of old) {
+    onDisk[page] = '<html>'
+  }
+
+  htmlDisk(on, onDisk, written)
+  on('fs.list', () => ({
+    value: [
+      { name: 's1', kind: 'dir' as const, size: 0, mtimeMs: 0, isLink: false },
+      { name: 'old-session', kind: 'dir' as const, size: 0, mtimeMs: 0, isLink: false },
+    ],
+  }))
+  gitHooks(
+    on,
+    args => {
+      // `rm -f -- <pages>`, as git's helper hands it on without the command's name: gone from disk.
+      if (args[0] === '-f') {
+        for (const path of args.slice(2)) {
+          delete onDisk[path]
+          written.delete(path)
+        }
+      }
+
+      return args[0] === 'diff' && args[1] === '--no-index' ? { stdout: '@@ -1 +1 @@\n-a = 0\n+a = 1\n', exitCode: 1 } : {}
+    },
+    ran,
+  )
+  on('tool.call', ($, event) => ({ result: { filePath: String((event as { file_path?: unknown }).file_path) } }) as never)
+  on('command.run', () => ({ text: '' }))
+  const toasts: string[] = []
+
+  on('ui.toast', ($, event) => {
+    toasts.push(String((event as { text?: unknown }).text))
+
+    return { value: undefined }
+  })
+  // The plugin's store, as the engine keeps it.
+  const store = new Map<string, unknown>([['htmlPages', ['/elsewhere/gone.html', ...old]]])
+
+  on('store.get', ($, event) => ({ value: store.get(String((event as { key?: unknown }).key)) }))
+  on('store.set', ($, event) => {
+    store.set(String((event as { key?: unknown }).key), (event as { value?: unknown }).value)
+
+    return { value: undefined }
+  })
+  await $.tool.call({ tool: 'Edit', file_path: '/project/app/a.py', old_string: '0', new_string: '1' } as never)
+
+  const run = (args: string) => $.command.run({ command: 'code-viewer', args, presentation: { isFullscreen: false } } as never)
+  const made = await run('html session')
+
+  // 49 kept (the one gone from disk dropped) and this one.
+  expect(made.text).toContain('50 HTML pages are kept on disk: /code-viewer html clean deletes them.')
+  expect(store.get('htmlPages')).toHaveLength(50)
+
+  expect(toasts).toEqual(['Code viewer: 50 HTML pages kept. Run /code-viewer html clean to delete them.'])
+
+  const cleaned = await run('html clean')
+
+  expect(cleaned.text).toBe('Code viewer: deleted 50 HTML pages, and the snapshots of 1 earlier session.')
+  expect(ran.some(line => line.startsWith('-f -- /tmp/code-viewer/old-0.html'))).toBe(true)
+  expect(ran).toContain('-rf -- /tmp/code-viewer-snapshots/old-session')
+  // Nothing else: not a page gone from disk already, nor this session's snapshots.
+  const removals = ran.filter(line => line.startsWith('-f ') || line.startsWith('-rf '))
+
+  expect(removals.some(line => line.includes('/elsewhere/gone.html') || line.includes('snapshots/s1'))).toBe(false)
 })

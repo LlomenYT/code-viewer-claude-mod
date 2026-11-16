@@ -64,6 +64,16 @@ aside { width: 340px; min-width: 200px; max-width: 60vw; resize: horizontal; ove
 .file:hover { background: #2a2f38; }
 .file.on { background: var(--selected); color: var(--bright); }
 .file .name { flex: 1; overflow: hidden; text-overflow: ellipsis; }
+.tick { color: #98c379; font-weight: 700; width: 12px; text-align: center; }
+.file.read .name, .file.read .counts { opacity: .55; }
+.group .tick { margin-left: 2px; }
+.filebar button.read { border: 1px solid #3a3f4b; border-radius: 4px; padding: 1px 10px; color: var(--bright); font-size: 12.5px; }
+.filebar button.read:hover { border-color: #98c379; color: #98c379; }
+.filebar button.read.done { color: #98c379; border-color: rgba(152, 195, 121, .5); }
+.closed-file { padding: 40px; color: var(--dim); display: flex; flex-direction: column; gap: 14px; align-items: flex-start; }
+.closed-file .big { color: #98c379; font-size: 16px; }
+.closed-file button { border: 1px solid #3a3f4b; border-radius: 4px; padding: 3px 12px; color: var(--text); }
+.closed-file button:hover { color: var(--bright); border-color: var(--accent); }
 .mark { font: 600 11px var(--mono); width: 10px; text-align: center; }
 .mark-A, .mark-\? { color: #98c379; }
 .mark-M { color: var(--accent); }
@@ -155,6 +165,7 @@ kbd { font: 11.5px var(--mono); color: var(--bright); background: #2c313a; borde
       <span class="about" id="file-about"></span>
       <span class="counts" id="file-counts"></span>
       <span class="nav"><button id="prev-change"></button> <button id="next-change"></button></span>
+      <button class="read" id="read" title="R"></button>
     </div>
     <div class="findbar" id="findbar">
       <input id="find" autocomplete="off" spellcheck="false">
@@ -182,7 +193,9 @@ kbd { font: 11.5px var(--mono); color: var(--bright); background: #2c313a; borde
       binary: 'Binary file: no lines to show.', noLines: 'No lines changed.', renamed: from => `renamed from ${from}`,
       results: (n, more) => `${n}${more ? '+' : ''} ${n === 1 ? 'match' : 'matches'}`, noResults: 'No matches.', typeMore: 'Type at least 2 characters.',
       noFile: 'Pick a file on the left.', generated: 'generated',
-      keys: [['Ctrl+P', 'files'], ['Ctrl+Shift+F', 'search everywhere'], ['Ctrl+F', 'find in file'], ['Alt+↑/↓', 'previous/next file'], ['N / Shift+N', 'next/previous change'], ['W', 'wrap lines']],
+      markRead: '✓ Mark as read', markUnread: '✓ Read · mark as unread', readCount: (n, total) => `${n}/${total} read`,
+      isRead: 'You marked this file as read.', allRead: 'Every file is read.', showAnyway: 'Show the changes',
+      keys: [['Ctrl+P', 'files'], ['Ctrl+Shift+F', 'search everywhere'], ['Ctrl+F', 'find in file'], ['Alt+↑/↓', 'previous/next file'], ['N / Shift+N', 'next/previous change'], ['W', 'wrap lines'], ['R', 'mark as read']],
       notes: { 'new file': 'new file', 'new file, untracked': 'new file, untracked', deleted: 'deleted', 'changed by a shell command: against the last commit': 'changed by a shell command: against the last commit' },
     },
     es: {
@@ -193,7 +206,9 @@ kbd { font: 11.5px var(--mono); color: var(--bright); background: #2c313a; borde
       binary: 'Fichero binario: no hay líneas que mostrar.', noLines: 'Sin líneas cambiadas.', renamed: from => `renombrado desde ${from}`,
       results: (n, more) => `${n}${more ? '+' : ''} ${n === 1 ? 'resultado' : 'resultados'}`, noResults: 'Sin resultados.', typeMore: 'Escribe al menos 2 caracteres.',
       noFile: 'Elige un fichero a la izquierda.', generated: 'generado',
-      keys: [['Ctrl+P', 'ficheros'], ['Ctrl+Shift+F', 'buscar en todo'], ['Ctrl+F', 'buscar en fichero'], ['Alt+↑/↓', 'fichero anterior/siguiente'], ['N / Shift+N', 'cambio siguiente/anterior'], ['W', 'ajustar líneas']],
+      markRead: '✓ Marcar como leído', markUnread: '✓ Leído · marcar como no leído', readCount: (n, total) => `${n}/${total} leídos`,
+      isRead: 'Has marcado este fichero como leído.', allRead: 'Has leído todos los ficheros.', showAnyway: 'Ver los cambios',
+      keys: [['Ctrl+P', 'ficheros'], ['Ctrl+Shift+F', 'buscar en todo'], ['Ctrl+F', 'buscar en fichero'], ['Alt+↑/↓', 'fichero anterior/siguiente'], ['N / Shift+N', 'cambio siguiente/anterior'], ['W', 'ajustar líneas'], ['R', 'marcar como leído']],
       notes: { 'new file': 'fichero nuevo', 'new file, untracked': 'fichero nuevo, sin seguimiento', deleted: 'borrado', 'changed by a shell command: against the last commit': 'cambiado por un comando: respecto al último commit' },
     },
   }
@@ -220,11 +235,14 @@ kbd { font: 11.5px var(--mono); color: var(--bright); background: #2c313a; borde
   if (data.repository) sub.push(data.repository)
   if (data.generatedAt) sub.push(`${t.generated} ${new Date(data.generatedAt).toLocaleString(data.language)}`)
   $('sub').textContent = sub.join(' · ')
-  $('stats').innerHTML = ''
-  $('stats').append(
-    t.filesCount(data.total) + (data.total > data.files.length ? ` (${t.of(data.files.length, data.total)})` : '') + ' · ',
-    el('span', 'plus', `+${data.added}`), ' ', el('span', 'minus', `−${data.removed}`),
-  )
+  function drawStats() {
+    $('stats').textContent = ''
+    $('stats').append(
+      t.filesCount(data.total) + (data.total > data.files.length ? ` (${t.of(data.files.length, data.total)})` : '') + ' · ',
+      el('span', 'plus', `+${data.added}`), ' ', el('span', 'minus', `−${data.removed}`), ' · ',
+      el('span', read.size > 0 ? 'tick' : '', t.readCount(read.size, data.files.length)),
+    )
+  }
   $('tab-files').textContent = t.files
   $('tab-search').textContent = t.search
   $('filter').placeholder = t.filter
@@ -247,6 +265,15 @@ kbd { font: 11.5px var(--mono); color: var(--bright); background: #2c313a; borde
   let current
   let visible = files
 
+  // What the person marked as read: this page's alone, kept in the browser. A page generated
+  // again is another page (another generatedAt), so it starts with nothing read.
+  const READ_KEY = `code-viewer-read:${location.pathname}:${data.generatedAt}`
+  const read = new Set()
+  try { for (const path of JSON.parse(localStorage.getItem(READ_KEY) || '[]')) if (byPath.has(path)) read.add(path) } catch {}
+  const saveRead = () => { try { localStorage.setItem(READ_KEY, JSON.stringify([...read])) } catch {} }
+  // A read file opens closed; this one was asked to be shown anyway.
+  let shownAnyway
+
   function counts(file) {
     const span = el('span', 'counts')
     if (file.b) span.append(el('span', 'dim', 'bin'))
@@ -264,17 +291,20 @@ kbd { font: 11.5px var(--mono); color: var(--bright); background: #2c313a; borde
       if (file.dir !== dir) {
         dir = file.dir
         const group = el('div', `group${closed.has(dir) && words.length === 0 ? ' closed' : ''}`)
+        const inDir = files.filter(other => other.dir === file.dir)
         group.append(el('span', 'caret', '▾'), dir || '.')
+        if (inDir.every(other => read.has(other.p))) group.append(el('span', 'tick', '✓'))
         group.title = dir
         const which = dir
         group.onclick = () => { closed.has(which) ? closed.delete(which) : closed.add(which); drawTree() }
         tree.append(group)
       }
       if (closed.has(dir) && words.length === 0) continue
-      const row = el('div', `file${file === current ? ' on' : ''}`)
+      const isRead = read.has(file.p)
+      const row = el('div', `file${file === current ? ' on' : ''}${isRead ? ' read' : ''}`)
       row.dataset.path = file.p
       row.title = file.f ? `${file.f} → ${file.p}` : file.p
-      row.append(el('span', `mark mark-${file.m}`, file.m), el('span', 'name', file.name), counts(file))
+      row.append(el('span', `mark mark-${file.m}`, file.m), el('span', 'name', file.name), counts(file), el('span', 'tick', isRead ? '✓' : ''))
       row.onclick = () => open(file)
       tree.append(row)
     }
@@ -363,7 +393,11 @@ kbd { font: 11.5px var(--mono); color: var(--bright); background: #2c313a; borde
     $('file-counts').append(counts(file))
     const scroller = $('scroller')
     scroller.textContent = ''
-    scroller.append(draw(file))
+    const isClosed = read.has(file.p) && shownAnyway !== file
+    if (shownAnyway !== file) shownAnyway = undefined
+    $('read').textContent = read.has(file.p) ? t.markUnread : t.markRead
+    $('read').classList.toggle('done', read.has(file.p))
+    scroller.append(isClosed ? closedView(file) : draw(file))
     scroller.scrollTop = 0
     const hash = `#${encodeURIComponent(file.p)}`
     if (location.hash !== hash) history.replaceState(null, '', hash)
@@ -375,6 +409,35 @@ kbd { font: 11.5px var(--mono); color: var(--bright); background: #2c313a; borde
       const first = scroller.querySelector('tr.chunk')
       if (first && first.offsetTop > scroller.clientHeight * 0.6) scroller.scrollTop = first.offsetTop - 80
     }
+  }
+
+  function closedView(file) {
+    const box = el('div', 'closed-file')
+    const show = el('button', '', t.showAnyway)
+    show.onclick = () => { shownAnyway = file; open(file) }
+    box.append(el('div', 'big', `✓ ${read.size === files.length ? t.allRead : t.isRead}`), show)
+    return box
+  }
+
+  /** Marks the file in view as read, closes it and goes on to the next unread one; or marks it unread again. */
+  function toggleRead() {
+    if (!current) return
+    const file = current
+    if (read.has(file.p)) read.delete(file.p)
+    else read.add(file.p)
+    saveRead()
+    drawStats()
+    drawTree()
+    if (!read.has(file.p)) {
+      shownAnyway = undefined
+      open(file)
+      return
+    }
+    const list = visible.length > 0 ? visible : files
+    const at = list.indexOf(file)
+    const next = [...list.slice(at + 1), ...list.slice(0, at)].find(other => !read.has(other.p))
+    shownAnyway = undefined
+    open(next || file)
   }
 
   function goToLine({ n, o }) {
@@ -549,7 +612,12 @@ kbd { font: 11.5px var(--mono); color: var(--bright); background: #2c313a; borde
           const item = el('div', 'result')
           const where = row[0] === '-' ? { o: row[1] } : { n: row[2] }
           item.append(el('span', 'no', String(row[0] === '-' ? row[1] : row[2])), el('span', row[0] === '+' ? 'plus' : row[0] === '-' ? 'minus' : 'dim', row[0] === ' ' ? ' ' : row[0]), highlight(text.trim(), needle))
-          item.onclick = () => (current === file ? goToLine(where) : open(file, where))
+          // A match in a file marked read shows it anyway: the line asked for is in its changes.
+          item.onclick = () => {
+            if (current === file && $('scroller').querySelector('table')) return goToLine(where)
+            shownAnyway = file
+            open(file, where)
+          }
           fragment.append(item)
           count += 1
           if (count >= MAX_RESULTS) break outer
@@ -585,6 +653,7 @@ kbd { font: 11.5px var(--mono); color: var(--bright); background: #2c313a; borde
   $('find-prev').onclick = () => stepFind(-1)
   $('find-next').onclick = () => stepFind(1)
   $('find-close').onclick = closeFind
+  $('read').onclick = toggleRead
   $('prev-change').onclick = () => stepChange(-1)
   $('next-change').onclick = () => stepChange(1)
   const toggleWrap = () => {
@@ -605,6 +674,7 @@ kbd { font: 11.5px var(--mono); color: var(--bright); background: #2c313a; borde
     if (typing || mod || event.altKey) return
     if (key === 'n') { event.preventDefault(); stepChange(event.shiftKey ? -1 : 1) }
     if (key === 'w') toggleWrap()
+    if (key === 'r') toggleRead()
     if (event.key === 'Escape' && $('findbar').classList.contains('on')) closeFind()
   })
   window.addEventListener('hashchange', () => {
@@ -612,6 +682,7 @@ kbd { font: 11.5px var(--mono); color: var(--bright); background: #2c313a; borde
     if (file && file !== current) open(file)
   })
 
+  drawStats()
   drawTree()
   const start = byPath.get(decodeURIComponent(location.hash.slice(1))) || files[0]
   if (start) open(start)

@@ -47,7 +47,7 @@ import {
   typing,
 } from './actions'
 import { basename, clean, dirname, findIn, hunksOf, mentionsOf, relative, shortOf, unified } from './files'
-import { htmlConfigOf, snapshotBefore, writeHtmlDiff } from './html'
+import { cleanHtmlPages, htmlConfigOf, snapshotBefore, writeHtmlDiff } from './html'
 import type { HtmlRequest } from './html'
 import { resolveSettings } from './themes'
 import { languageOf, stateAfter, tokenizeLine } from './tokenize'
@@ -122,7 +122,7 @@ export const register: Register = (on, options) => {
     await $.command.register({
       name: 'code-viewer',
       description: 'Open a file, or its diff, in the code pane',
-      argumentHint: '[diff] [file[:line] | search words] | changes | html [session | base]',
+      argumentHint: '[diff] [file[:line] | search words] | changes | html [session | base | clean]',
       immediate: true,
     })
     await $.tool.register({
@@ -153,6 +153,11 @@ export const register: Register = (on, options) => {
 
     if (html !== null) {
       const what = (html[1] ?? '').trim()
+
+      if (what === 'clean') {
+        return { text: await cleanHtmlPages($) }
+      }
+
       const request: HtmlRequest = what === 'session' ? { source: 'session' } : what === '' ? {} : { base: what }
 
       return { text: (await writeHtmlDiff($, settings, htmlConfig, request)).text }
@@ -1130,13 +1135,13 @@ export const register: Register = (on, options) => {
           {choice(
             'html',
             'h',
-            'html',
+            'view on browser',
             false,
             async () => {
               // The git changes where git is what is shown, with a base picked; else Claude's of the session.
               const isGit = baseBranch !== '' && (current.mode === 'changes' || (current.mode === 'diff' && current.diffKind === 'git'))
 
-              await say($, isGit ? `Writing the changes against ${clean(baseBranch)} as HTML…` : "Writing Claude's changes of the session as HTML…")
+              await say($, isGit ? `Opening the changes against ${clean(baseBranch)} in the browser…` : "Opening Claude's changes of the session in the browser…")
               await say($, (await writeHtmlDiff($, settings, htmlConfig, isGit ? { source: 'git' } : { source: 'session' })).text.replace(/^Code viewer: /, ''))
             },
             true,
