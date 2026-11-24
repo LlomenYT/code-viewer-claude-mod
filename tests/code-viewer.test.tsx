@@ -77,6 +77,171 @@ test('the tokenizer colors each language it knows', async () => {
   expect(kinds('markdown', '## Install')).toEqual(['heading:## Install'])
 })
 
+test('the C family tokenizers color Swift, Kotlin, Dart, Java, C/C++, C#, Go and Rust', async () => {
+  expect(languageOf('App/RootView.swift')).toBe('swift')
+  expect(languageOf('build.gradle.kts')).toBe('kotlin')
+  expect(languageOf('lib/main.dart')).toBe('dart')
+  expect(languageOf('Main.java')).toBe('java')
+  expect(languageOf('engine.hpp')).toBe('c')
+  expect(languageOf('Program.cs')).toBe('csharp')
+  expect(languageOf('main.go')).toBe('go')
+  expect(languageOf('lib.rs')).toBe('rust')
+
+  expect(kinds('swift', '@Environment(AppSession.self) private var session')).toEqual([
+    'function:@Environment',
+    'punctuation:(',
+    'type:AppSession',
+    'punctuation:.',
+    'constant:self',
+    'punctuation:)',
+    'keyword:private var',
+    'plain:session',
+  ])
+  expect(kinds('swift', 'Text("Hi \\(name.uppercased())")')).toEqual([
+    'type:Text',
+    'punctuation:(',
+    'string:"Hi',
+    'punctuation:\\(',
+    'plain:name',
+    'punctuation:.',
+    'function:uppercased',
+    'punctuation:())',
+    'string:"',
+    'punctuation:)',
+  ])
+  expect(kinds('dart', "child: Text('Hello $name ${user.age}'),")).toEqual([
+    'property:child',
+    'operator::',
+    'type:Text',
+    'punctuation:(',
+    "string:'Hello",
+    'punctuation:$',
+    'plain:name',
+    'punctuation:${',
+    'plain:user',
+    'punctuation:.',
+    'property:age',
+    'punctuation:}',
+    "string:'",
+    'punctuation:),',
+  ])
+  expect(kinds('kotlin', 'data class User(val name: String)')).toEqual([
+    'keyword:data class',
+    'type:User',
+    'punctuation:(',
+    'keyword:val',
+    'plain:name',
+    'operator::',
+    'type:String',
+    'punctuation:)',
+  ])
+  // A modifier is a keyword only before another word: `val data` names a variable.
+  expect(kinds('kotlin', 'val data = items.filter { it.ok }').slice(0, 7)).toEqual([
+    'keyword:val',
+    'plain:data',
+    'operator:=',
+    'plain:items',
+    'punctuation:.',
+    'function:filter',
+    'punctuation:{',
+  ])
+  expect(kinds('java', "@Override public void run() { char c = '\\u0041'; }")).toEqual([
+    'function:@Override',
+    'keyword:public',
+    'type:void',
+    'function:run',
+    'punctuation:() {',
+    'type:char',
+    'plain:c',
+    'operator:=',
+    "string:'\\u0041'",
+    'punctuation:; }',
+  ])
+  expect(kinds('c', '#include <vector>')).toEqual(['keyword:#include', 'string:<vector>'])
+  expect(kinds('c', 'std::vector<int> v; // ok')).toEqual([
+    'plain:std',
+    'operator:::',
+    'plain:vector',
+    'operator:<',
+    'type:int',
+    'operator:>',
+    'plain:v',
+    'punctuation:;',
+    'comment:// ok',
+  ])
+  expect(kinds('csharp', 'public async Task<int> GetAsync() => await Find();')).toEqual([
+    'keyword:public async',
+    'type:Task',
+    'operator:<',
+    'type:int',
+    'operator:>',
+    'function:GetAsync',
+    'punctuation:()',
+    'operator:=>',
+    'keyword:await',
+    'function:Find',
+    'punctuation:();',
+  ])
+  expect(kinds('go', 'func (s *Server) Start() error {')).toEqual([
+    'keyword:func',
+    'punctuation:(',
+    'plain:s',
+    'operator:*',
+    'type:Server',
+    'punctuation:)',
+    'function:Start',
+    'punctuation:()',
+    'type:error',
+    'punctuation:{',
+  ])
+  expect(kinds('rust', `#[derive(Debug)] fn f<'a>(s: &'a str) { println!("{}", s) }`)).toEqual([
+    'function:#[derive',
+    'punctuation:(',
+    'type:Debug',
+    'punctuation:)]',
+    'keyword:fn',
+    'function:f',
+    'operator:<',
+    "type:'a",
+    'operator:>',
+    'punctuation:(',
+    'plain:s',
+    'operator:: &',
+    "type:'a str",
+    'punctuation:) {',
+    'function:println!',
+    'punctuation:(',
+    'string:"{}"',
+    'punctuation:,',
+    'plain:s',
+    'punctuation:) }',
+  ])
+})
+
+test('the C family carries comments and multi-line strings across lines', async () => {
+  // Swift, Kotlin, Dart and Rust nest block comments; C, Java, C# and Go do not.
+  expect(stateAfter('rust', ['/* a /* b */', 'c'])).toBe('c')
+  expect(stateAfter('rust', ['/* a /* b */', 'c */ d'])).toBe('')
+  expect(stateAfter('c', ['/* a /* b */', 'c'])).toBe('')
+  expect(stateAfter('swift', ['let text = """', '  hi'])).toBe('se\\"""')
+  expect(kinds('swift', '  hi \\(n) """ + x', 'se\\"""')).toEqual([
+    'string:hi',
+    'punctuation:\\(',
+    'plain:n',
+    'punctuation:)',
+    'string:"""',
+    'operator:+',
+    'plain:x',
+  ])
+  expect(stateAfter('go', ['s := `a', 'b'])).toBe('sr-`')
+  expect(stateAfter('go', ['s := `a', 'b` + c'])).toBe('')
+  expect(stateAfter('c', ['auto s = R"x(raw', 'still )" no'])).toBe('sr-)x"')
+  expect(stateAfter('c', ['auto s = R"x(raw', 'done)x";'])).toBe('')
+  expect(stateAfter('dart', ["x = r'''", '$raw'])).toBe("sr-'''")
+  // A one-line string left open does not color the lines after it.
+  expect(stateAfter('kotlin', ['val s = "open'])).toBe('')
+})
+
 test('a state is carried from one line to the next', async () => {
   expect(tokenizeLine('js', 'a /* open', '').state).toBe('c')
   expect(kinds('js', 'still */ b', 'c')).toEqual(['comment:still */', 'plain:b'])

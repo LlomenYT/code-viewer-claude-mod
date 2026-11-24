@@ -2,13 +2,13 @@
 
 # 👁 Code Viewer for Claude Code
 
-<img src="assets/screenshot.png" alt="The Code Viewer pane showing a git diff against origin/pre, with tabs, added and removed lines highlighted" width="640">
+<img src="assets/screenshot.png" alt="The Code Viewer pane showing a Swift file with syntax highlighting, open tabs and the keyboard shortcuts" width="640">
 
 **Read the code Claude is touching without leaving the conversation.**
 
 A side pane for [Claude Code](https://claude.com/claude-code) with tabs, fuzzy file search, syntax highlighting and clean diffs.
 
-[![Version](https://img.shields.io/badge/version-0.0.5-D97757?style=for-the-badge)](.claude-plugin/plugin.json)
+[![Version](https://img.shields.io/badge/version-0.0.6-D97757?style=for-the-badge)](.claude-plugin/plugin.json)
 [![Claude Code mod](https://img.shields.io/badge/Claude%20Code-mod-D97757?style=for-the-badge&logo=claude&logoColor=white)](https://claude.com/claude-code)
 [![Built with Claude](https://img.shields.io/badge/built%20with-Claude-191919?style=for-the-badge&logo=anthropic&logoColor=white)](https://www.anthropic.com/claude)
 [![License: MIT](https://img.shields.io/badge/license-MIT-2ea44f?style=for-the-badge)](LICENSE)
@@ -17,6 +17,8 @@ A side pane for [Claude Code](https://claude.com/claude-code) with tabs, fuzzy f
 
 ---
 
+> **v0.0.6** colors Swift, Kotlin, Dart (Flutter), Java, C, C++, Objective-C, C#, Go and Rust with the themeable highlighter, in the pane and in the HTML page.
+>
 > **v0.0.5** lets you mark files as read in the HTML page, and `/code-viewer html clean` deletes the pages the plugin wrote.
 >
 > **v0.0.4** wrote your diffs as an HTML page for the browser: every file changed against a branch, or every file Claude changed this session, with a file tree, syntax highlighting, search and keys to step through changes. Claude made one for you when you asked.
@@ -32,7 +34,7 @@ A side pane for [Claude Code](https://claude.com/claude-code) with tabs, fuzzy f
 | 🔎 | **Fuzzy search** | Type part of a name or path and results appear under the field as you type. `Enter` opens the first; `↓` picks another. |
 | 🔦 | **Search in a file** | Press `e` on a file and type: every match is highlighted, and `Enter`, `↓` and `↑` jump between them across the whole file. |
 | 📑 | **Tabs** | Every file you open stays as a tab (up to nine). Hover a tab to get a red `×`, or press `w`. |
-| 🎨 | **Syntax highlighting** | JavaScript, TypeScript, JSX/TSX, Python, JSON, YAML and Markdown use a themeable highlighter. Other languages use Claude Code's own. |
+| 🎨 | **Syntax highlighting** | JavaScript, TypeScript, JSX/TSX (React and React Native), Python, Swift, Kotlin, Dart (Flutter), Java, C, C++, Objective-C, C#, Go, Rust, JSON, YAML and Markdown use a themeable highlighter. Other languages use Claude Code's own. |
 | 🧩 | **Claude's diff** | See exactly what Claude changed in a file, block by block, with `Added N lines, removed M lines` headers. |
 | 🌿 | **Git diff against a branch** | Pick a base such as `origin/dev` and see only your own changes: the file is compared with the commit your branch forked from. |
 | 🌐 | **HTML diff in the browser** | Ask Claude ("show me the changes against dev in the browser"), press `h` in the pane, or run `/code-viewer html`. One page with every changed file: a tree with counts, colors, unchanged lines that open with a click, search in every diff and in a file. |
@@ -126,7 +128,7 @@ When the pane does not have the keyboard, `ctrl+x tab` gives it to the pane.
 - The session list only keeps code files: no `.txt`, `.md`, `.json`, and nothing under `.claude/`.
 - The git diff uses your local copy of the base branch; it does not run `git fetch`.
 - The pane docks to the right only in `/tui fullscreen` and from 110 columns: Claude Code decides where panes go, and a mod cannot change it.
-- An HTML page holds up to 500 files. A file over 20,000 lines shows its changes, but its unchanged lines cannot be opened. Colors come from the plugin's highlighter (JavaScript, TypeScript, Python, JSON, YAML, Markdown); other languages are plain.
+- An HTML page holds up to 500 files. A file over 20,000 lines shows its changes, but its unchanged lines cannot be opened. Colors come from the plugin's highlighter (the languages under *Syntax highlighting* above); other languages are plain.
 - The session page only knows the files Claude changed after this version was installed and loaded.
 
 ## ⚙️ Options
@@ -180,6 +182,6 @@ claude plugin test .
 
 <div align="center">
 
-Made for <a href="https://claude.com/claude-code">Claude Code</a> · Code Viewer v0.0.5
+Made for <a href="https://claude.com/claude-code">Claude Code</a> · Code Viewer v0.0.6
 
 </div>

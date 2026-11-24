@@ -20,7 +20,8 @@ export type Kind =
 
 export type Span = [kind: Kind, text: string]
 export type Lexed = { spans: Span[]; state: string }
-export type Lang = 'js' | 'jsx' | 'python' | 'json' | 'yaml' | 'markdown'
+export type Lang = 'js' | 'jsx' | 'python' | 'json' | 'yaml' | 'markdown' | CLang
+type CLang = 'swift' | 'kotlin' | 'dart' | 'java' | 'c' | 'csharp' | 'go' | 'rust'
 
 const EXTENSIONS: Record<string, Lang> = {
   js: 'js',
@@ -41,6 +42,29 @@ const EXTENSIONS: Record<string, Lang> = {
   md: 'markdown',
   markdown: 'markdown',
   mdx: 'markdown',
+  swift: 'swift',
+  kt: 'kotlin',
+  kts: 'kotlin',
+  dart: 'dart',
+  java: 'java',
+  // C, C++ and Objective-C share one tokenizer: a `.h` can be any of them.
+  c: 'c',
+  h: 'c',
+  cc: 'c',
+  cpp: 'c',
+  cxx: 'c',
+  hh: 'c',
+  hpp: 'c',
+  hxx: 'c',
+  ipp: 'c',
+  inl: 'c',
+  ino: 'c',
+  m: 'c',
+  mm: 'c',
+  cs: 'csharp',
+  csx: 'csharp',
+  go: 'go',
+  rs: 'rust',
 }
 
 /** The language the mod themes a path in, or undefined when it has none for it. */
@@ -65,6 +89,15 @@ export function tokenizeLine(language: Lang, line: string, state: string): Lexed
       return yamlLine(line, state)
     case 'markdown':
       return markdownLine(line, state)
+    case 'swift':
+    case 'kotlin':
+    case 'dart':
+    case 'java':
+    case 'c':
+    case 'csharp':
+    case 'go':
+    case 'rust':
+      return cFamilyLine(C_FAMILIES[language], line, state)
   }
 }
 
@@ -1086,4 +1119,542 @@ function markdownLine(line: string, entering: string): Lexed {
   output.push('plain', line.slice(position))
 
   return { spans: output.spans, state: '' }
+}
+
+// --- C family: Swift, Kotlin, Dart, Java, C/C++/Objective-C, C#, Go, Rust ----
+
+// What a string's `$name`, `${…}` or `\(…)` interpolates, if anything.
+type Interpolation = '' | '$' | '\\'
+type StringRule = { close: string; isRaw: boolean; interpolation: Interpolation; isMultiline: boolean }
+
+type CFamily = {
+  keywords: Set<string>
+  /** Keywords only where another word follows, as in `data class`: elsewhere names. */
+  softKeywords: Set<string>
+  constants: Set<string>
+  /** Lower-case built-in types: a capitalized word is a type in every one of these languages. */
+  types: Set<string>
+  /** Words that name the function or the type after them: `func`, `class`. */
+  declaresFunction: Set<string>
+  declaresType: Set<string>
+  /** A string's opening, sticky, and the rule of the string it opens. */
+  stringOpener: RegExp
+  openString: (opener: string) => StringRule
+  /** A character literal, sticky, where `'` opens one. */
+  char?: RegExp
+  /** The color of `@Name`, where it is an annotation or an attribute. */
+  annotation?: Kind
+  hasNestedComments: boolean
+  /** `#include`, `#if`, `#region` at a line's start. */
+  hasPreprocessor: boolean
+  /** Swift's `#available`, `#Preview`. */
+  hasHashKeywords: boolean
+  /** Rust's `#[derive(…)]`, `println!(…)` and `'a`. */
+  isRust: boolean
+  /** `` `default` ``: a name in backticks. */
+  hasQuotedNames: boolean
+  /** `Text(…)` builds a type rather than calling a function. */
+  constructsCapitalized: boolean
+  /** `child: Text(…)`: a word before `:` at a line's start or after `(`, `,` or `[` is a label. */
+  hasLabels: boolean
+  /** `list.filter { … }` calls `filter` with a lambda. */
+  hasTrailingLambdas: boolean
+}
+
+const words = (text: string) => new Set(text.split(/\s+/).filter(word => word !== ''))
+const NO_WORDS = new Set<string>()
+
+function family(spec: Partial<CFamily> & Pick<CFamily, 'keywords' | 'stringOpener' | 'openString'>): CFamily {
+  return {
+    softKeywords: NO_WORDS,
+    constants: NO_WORDS,
+    types: NO_WORDS,
+    declaresFunction: NO_WORDS,
+    declaresType: NO_WORDS,
+    hasNestedComments: false,
+    hasPreprocessor: false,
+    hasHashKeywords: false,
+    isRust: false,
+    hasQuotedNames: false,
+    constructsCapitalized: true,
+    hasLabels: false,
+    hasTrailingLambdas: false,
+    ...spec,
+  }
+}
+
+const stringRule = (close: string, isRaw = false, interpolation: Interpolation = '', isMultiline = false): StringRule => ({
+  close,
+  isRaw,
+  interpolation,
+  isMultiline,
+})
+
+// A string open at a line's end: `s`, `r` (raw) or `e` (escapes), its interpolation or `-`,
+// then what closes it. A block comment open at a line's end: one `c` per level.
+const encodeString = (rule: StringRule) => `s${rule.isRaw ? 'r' : 'e'}${rule.interpolation || '-'}${rule.close}`
+const decodeString = (state: string) =>
+  stringRule(state.slice(3), state[1] === 'r', (state[2] === '-' ? '' : state[2]) as Interpolation, true)
+
+const C_CHAR = /'(?:\\(?:u\{[\da-fA-F]+\}|u[\da-fA-F]{4}|U[\da-fA-F]{8}|x[\da-fA-F]{1,4}|[0-7]{1,3}|.)|[^'\\])'/uy
+const C_NUMBER =
+  /(?:0[xX][\da-fA-F_']+(?:\.[\da-fA-F_]*)?(?:[pP][+-]?\d+)?|0[bB][01_']+|0[oO][0-7_]+|\d[\d_']*(?:\.\d[\d_']*)?(?:[eE][+-]?\d[\d_]*)?)(?:[A-Za-z_]\w*)?/y
+const WORD_AHEAD = /[ \t]+[A-Za-z_@`]/y
+const LABEL_AHEAD = /\s*:(?!:)/y
+const LAMBDA_AHEAD = /\s*\{/y
+const LABEL_POSITION = new Set(['', '(', ',', '['])
+
+const C_FAMILIES: Record<CLang, CFamily> = {
+  swift: family({
+    keywords: words(`associatedtype class deinit enum extension fileprivate func import init inout internal let
+      operator private precedencegroup protocol public rethrows static struct subscript typealias var break case
+      catch continue default defer do else fallthrough for guard if in repeat return throw switch where while as
+      is try throws async await get set willSet didSet`),
+    softKeywords: words(`open some any package optional dynamic required lazy weak unowned convenience mutating
+      nonmutating override final indirect nonisolated isolated consuming borrowing macro actor infix prefix postfix`),
+    constants: words('true false nil self Self super'),
+    declaresFunction: words('func'),
+    declaresType: words('class struct enum protocol extension actor typealias associatedtype'),
+    // `#"…"#` is raw; `"""` spans lines; both `"` and `"""` interpolate `\(…)`.
+    stringOpener: /#+"(?:"")?|"""|"/y,
+    openString: opener => {
+      const hashes = opener.replace(/"+$/, '')
+      const quotes = opener.slice(hashes.length)
+
+      return stringRule(quotes + hashes, hashes !== '', hashes === '' ? '\\' : '', quotes.length === 3)
+    },
+    annotation: 'function',
+    hasNestedComments: true,
+    hasHashKeywords: true,
+    hasQuotedNames: true,
+    hasLabels: true,
+  }),
+  kotlin: family({
+    keywords: words(`as break class continue do else for fun if in interface is object package return throw try
+      typealias typeof val var when while catch finally import init constructor`),
+    softKeywords: words(`abstract actual annotation by companion const crossinline data enum expect external final
+      infix inline inner internal lateinit noinline open operator out override private protected public reified
+      sealed suspend tailrec value vararg where`),
+    constants: words('true false null this super'),
+    declaresFunction: words('fun'),
+    declaresType: words('class interface object typealias'),
+    stringOpener: /"""|"/y,
+    openString: opener => (opener === '"""' ? stringRule('"""', true, '$', true) : stringRule('"', false, '$')),
+    char: C_CHAR,
+    annotation: 'function',
+    hasNestedComments: true,
+    hasQuotedNames: true,
+    hasTrailingLambdas: true,
+  }),
+  dart: family({
+    keywords: words(`abstract as assert async await break case catch class const continue default do else enum
+      export extends factory final finally for if implements import in is late new operator required rethrow
+      return static switch throw try typedef var while with yield`),
+    softKeywords: words('base covariant deferred extension external get hide interface library mixin on part sealed set show sync when'),
+    constants: words('true false null this super'),
+    types: words('int double num bool dynamic void'),
+    declaresType: words('class enum mixin extension typedef'),
+    // `r'…'` is raw; triple quotes span lines; the rest interpolate `$name` and `${…}`.
+    stringOpener: /[rR]?(?:"""|'''|"|')/y,
+    openString: opener => {
+      const quote = opener.replace(/^[rR]/, '')
+      const isRaw = quote !== opener
+
+      return stringRule(quote, isRaw, isRaw ? '' : '$', quote.length === 3)
+    },
+    annotation: 'function',
+    hasNestedComments: true,
+    hasLabels: true,
+  }),
+  java: family({
+    keywords: words(`abstract assert break case catch class const continue default do else enum extends final
+      finally for goto if implements import instanceof interface native new package private protected public
+      return static strictfp switch synchronized throw throws transient try volatile while`),
+    softKeywords: words('record sealed permits var yield'),
+    constants: words('true false null this super'),
+    types: words('boolean byte char short int long float double void'),
+    declaresType: words('class interface enum record'),
+    stringOpener: /"""|"/y,
+    openString: opener => (opener === '"""' ? stringRule('"""', false, '', true) : stringRule('"')),
+    char: C_CHAR,
+    annotation: 'function',
+  }),
+  c: family({
+    keywords: words(`alignas alignof and asm auto break case catch class concept const consteval constexpr
+      constinit const_cast continue co_await co_return co_yield decltype default delete do dynamic_cast else enum
+      explicit export extern for friend goto if inline mutable namespace new noexcept not operator or private
+      protected public register reinterpret_cast requires restrict return sizeof static static_assert static_cast
+      struct switch template thread_local throw try typedef typeid typename union using virtual volatile while xor`),
+    softKeywords: words('final override import module'),
+    constants: words('true false nullptr NULL this nil Nil YES NO self super'),
+    types: words(`void bool _Bool char short int long float double signed unsigned size_t ssize_t ptrdiff_t
+      intptr_t uintptr_t int8_t int16_t int32_t int64_t uint8_t uint16_t uint32_t uint64_t char8_t char16_t
+      char32_t wchar_t id instancetype`),
+    declaresType: words('class struct enum union namespace'),
+    // `R"tag(…)tag"` is raw and spans lines; `@"…"` is an Objective-C string.
+    stringOpener: /(?:u8|[uUL])?R"[^\s()\\"]{0,16}\(|(?:u8|[uUL@])?"/y,
+    openString: opener => {
+      const raw = opener.indexOf('R"')
+
+      return raw < 0 ? stringRule('"') : stringRule(`)${opener.slice(raw + 2, -1)}"`, true, '', true)
+    },
+    char: C_CHAR,
+    // Objective-C's `@interface`, `@property`, `@end`.
+    annotation: 'keyword',
+    hasPreprocessor: true,
+    constructsCapitalized: false,
+  }),
+  csharp: family({
+    keywords: words(`abstract as base break case catch checked class const continue default delegate do else enum
+      event explicit extern finally fixed for foreach goto if implicit in interface internal is lock namespace new
+      operator out override params private protected public readonly ref return sealed sizeof stackalloc static
+      struct switch throw try typeof unchecked unsafe using virtual volatile while get set init await`),
+    softKeywords: words('async var record where yield when with and or not partial global required file scoped managed unmanaged'),
+    constants: words('true false null this base'),
+    types: words('bool byte sbyte char decimal double float int uint long ulong short ushort object string void nint nuint dynamic'),
+    declaresType: words('class struct interface enum record namespace'),
+    // `"""…"""` and `@"…"` are raw and span lines.
+    stringOpener: /\$*"""|\$?@\$?"|\$?"/y,
+    openString: opener =>
+      opener.endsWith('"""')
+        ? stringRule('"""', true, '', true)
+        : opener.includes('@')
+          ? stringRule('"', true, '', true)
+          : stringRule('"'),
+    char: C_CHAR,
+    hasPreprocessor: true,
+    constructsCapitalized: false,
+  }),
+  go: family({
+    keywords: words(`break case chan const continue default defer else fallthrough for func go goto if import
+      interface map package range return select struct switch type var`),
+    constants: words('true false nil iota'),
+    types: words(`bool byte complex64 complex128 error float32 float64 int int8 int16 int32 int64 rune string uint
+      uint8 uint16 uint32 uint64 uintptr any comparable`),
+    declaresFunction: words('func'),
+    declaresType: words('type'),
+    stringOpener: /[`"]/y,
+    openString: opener => (opener === '`' ? stringRule('`', true, '', true) : stringRule('"')),
+    char: C_CHAR,
+    constructsCapitalized: false,
+  }),
+  rust: family({
+    keywords: words(`as async await break const continue crate dyn else enum extern fn for if impl in let loop
+      match mod move mut pub ref return static struct super trait type unsafe use where while yield macro_rules`),
+    softKeywords: words('union'),
+    constants: words('true false self Self'),
+    types: words('i8 i16 i32 i64 i128 isize u8 u16 u32 u64 u128 usize f32 f64 bool char str'),
+    declaresFunction: words('fn'),
+    declaresType: words('struct enum trait type union mod'),
+    // `r#"…"#` is raw; every Rust string may span lines.
+    stringOpener: /b?r#*"|[bc]?"/y,
+    openString: opener => {
+      const raw = /r(#*)"$/.exec(opener)
+
+      return raw === null ? stringRule('"', false, '', true) : stringRule(`"${raw[1]}`, true, '', true)
+    },
+    char: new RegExp(`b?${C_CHAR.source}`, 'uy'),
+    hasNestedComments: true,
+    isRust: true,
+  }),
+}
+
+type CLexer = { family: CFamily; line: string; output: SpanCollector; indent: number; nesting: number }
+
+/** Lexes a block comment's text from `from`, `depth` levels open. The index after it closes, or -1. */
+function blockComment(lexer: CLexer, from: number, depth: number): { position: number; depth: number } {
+  const { family, line, output } = lexer
+  let open = depth
+
+  for (let position = from; position < line.length; position++) {
+    if (line.startsWith('*/', position)) {
+      open -= 1
+      position += 1
+
+      if (open === 0) {
+        output.push('comment', line.slice(from, position + 1))
+
+        return { position: position + 1, depth: 0 }
+      }
+    } else if (family.hasNestedComments && line.startsWith('/*', position) && open < MAX_NESTING) {
+      open += 1
+      position += 1
+    }
+  }
+
+  output.push('comment', line.slice(from))
+
+  return { position: -1, depth: open }
+}
+
+/**
+ * Lexes a string's body from `from`, its opening already pushed, and its interpolations as
+ * code. The index after the closing quote, or -1 at the line's end.
+ */
+function cFamilyString(lexer: CLexer, from: number, rule: StringRule): number {
+  const { line, output } = lexer
+  const hasFields = rule.interpolation !== '' && lexer.nesting < PY_MAX_NESTING
+  let start = from
+  let position = from
+
+  const field = (mark: string, closer: ')' | '}') => {
+    output.push('string', line.slice(start, position))
+    output.push('punctuation', mark)
+    lexer.nesting += 1
+    position = cFamilyCode(lexer, position + mark.length, closer).position
+    lexer.nesting -= 1
+    start = position
+  }
+
+  while (position < line.length) {
+    const char = line[position]
+
+    if (hasFields && rule.interpolation === '\\' && line.startsWith('\\(', position)) {
+      field('\\(', ')')
+      continue
+    }
+
+    if (hasFields && rule.interpolation === '$' && char === '$') {
+      if (line[position + 1] === '{') {
+        field('${', '}')
+        continue
+      }
+
+      const name = matchAt(/[A-Za-z_]\w*/y, line, position + 1)
+
+      if (name !== undefined) {
+        output.push('string', line.slice(start, position))
+        output.push('punctuation', char)
+        output.push('plain', name)
+        position += 1 + name.length
+        start = position
+        continue
+      }
+    }
+
+    if (!rule.isRaw && char === '\\') {
+      position += 2
+    } else if (line.startsWith(rule.close, position)) {
+      output.push('string', line.slice(start, position + rule.close.length))
+
+      return position + rule.close.length
+    } else {
+      position += 1
+    }
+  }
+
+  output.push('string', line.slice(start))
+
+  return -1
+}
+
+/**
+ * Lexes code from `from` to the line's end or, inside an interpolation, to its `closer`.
+ * Where it stopped, and the comment or string left open at the line's end, if any.
+ */
+function cFamilyCode(lexer: CLexer, from: number, closer: '' | ')' | '}'): { position: number; state: string } {
+  const { family, line, output } = lexer
+  const opener = closer === ')' ? '(' : '{'
+  let position = from
+  let previous = closer === '' ? '' : '('
+  let previousWord = ''
+  // Brackets opened inside an interpolation, where its closer closes them instead.
+  let depth = 0
+
+  const step = (kind: Kind, text: string, after: string) => {
+    output.push(kind, text)
+    position += text.length
+    previous = after
+    previousWord = ''
+  }
+
+  while (position < line.length) {
+    const char = line[position] ?? ''
+    const space = matchAt(SPACE, line, position)
+
+    if (space !== undefined) {
+      output.push('plain', space)
+      position += space.length
+      continue
+    }
+
+    if (closer !== '' && depth === 0 && char === closer) {
+      output.push('punctuation', char)
+
+      return { position: position + 1, state: '' }
+    }
+
+    if (line.startsWith('//', position)) {
+      output.push('comment', line.slice(position))
+      break
+    }
+
+    if (line.startsWith('/*', position)) {
+      output.push('comment', '/*')
+
+      const comment = blockComment(lexer, position + 2, 1)
+
+      if (comment.position < 0) {
+        return { position: line.length, state: closer === '' ? IN_BLOCK_COMMENT.repeat(comment.depth) : '' }
+      }
+
+      position = comment.position
+      continue
+    }
+
+    if (char === '#' && family.hasPreprocessor && position === lexer.indent) {
+      const directive = matchAt(/#\s*\w*/y, line, position) ?? char
+
+      step('keyword', directive, AFTER_WORD)
+
+      const header = /include|import/.test(directive) ? matchAt(/\s*<[^>\n]*>/y, line, position) : undefined
+
+      if (header !== undefined) {
+        step('string', header, '"')
+      }
+
+      continue
+    }
+
+    if (char === '#' && family.isRust) {
+      const attribute = matchAt(/#!?\[[\w:]*/y, line, position)
+
+      if (attribute !== undefined) {
+        step('function', attribute, AFTER_WORD)
+        continue
+      }
+    }
+
+    const string = matchAt(family.stringOpener, line, position)
+
+    if (string !== undefined) {
+      const rule = family.openString(string)
+
+      output.push('string', string)
+
+      const end = cFamilyString(lexer, position + string.length, rule)
+
+      if (end < 0) {
+        return { position: line.length, state: rule.isMultiline && closer === '' ? encodeString(rule) : '' }
+      }
+
+      position = end
+      previous = '"'
+      previousWord = ''
+      continue
+    }
+
+    const literal = family.char === undefined ? undefined : matchAt(family.char, line, position)
+
+    if (literal !== undefined) {
+      step('string', literal, '"')
+      continue
+    }
+
+    const special =
+      char === '#' && family.hasHashKeywords
+        ? (['keyword', matchAt(/#[A-Za-z_]\w*/y, line, position)] as const)
+        : char === '@' && family.annotation !== undefined
+          ? ([family.annotation, matchAt(/@[A-Za-z_][\w.]*/y, line, position)] as const)
+          : char === "'" && family.isRust
+            ? (['type', matchAt(/'[A-Za-z_]\w*/y, line, position)] as const)
+            : char === '`' && family.hasQuotedNames
+              ? (['plain', matchAt(/`[^`]+`/y, line, position)] as const)
+              : undefined
+
+    if (special?.[1] !== undefined) {
+      step(special[0], special[1], AFTER_WORD)
+      continue
+    }
+
+    if (char >= '0' && char <= '9') {
+      step('number', matchAt(C_NUMBER, line, position) ?? char, AFTER_NUMBER)
+      continue
+    }
+
+    const word = matchAt(WORD, line, position)
+
+    if (word !== undefined) {
+      const after = position + word.length
+
+      if (family.isRust && line[after] === '!' && /[([{]/.test(line[after + 1] ?? '')) {
+        step('function', `${word}!`, AFTER_WORD)
+        continue
+      }
+
+      const isCalled = matchAt(CALL, line, after) !== undefined
+      const isKeyword =
+        family.keywords.has(word) || (family.softKeywords.has(word) && matchAt(WORD_AHEAD, line, after) !== undefined)
+      let kind: Kind = 'plain'
+
+      if (previous === '.' && !family.constants.has(word)) {
+        kind = isCalled || (family.hasTrailingLambdas && matchAt(LAMBDA_AHEAD, line, after) !== undefined) ? 'function' : 'property'
+      } else if (isKeyword) {
+        kind = 'keyword'
+      } else if (family.declaresFunction.has(previousWord)) {
+        kind = 'function'
+      } else if (family.declaresType.has(previousWord)) {
+        kind = 'type'
+      } else if (family.constants.has(word)) {
+        kind = 'constant'
+      } else if (family.hasLabels && LABEL_POSITION.has(previous) && matchAt(LABEL_AHEAD, line, after) !== undefined) {
+        kind = 'property'
+      } else if (/^[A-Z]/.test(word) && (!isCalled || family.constructsCapitalized)) {
+        kind = ALL_CAPS.test(word) && !isCalled ? 'constant' : 'type'
+      } else if (isCalled) {
+        kind = 'function'
+      } else if (family.types.has(word)) {
+        kind = 'type'
+      }
+
+      output.push(kind, word)
+      position = after
+      previous = AFTER_WORD
+      previousWord = word
+      continue
+    }
+
+    const operator = matchAt(OPERATOR, line, position)
+
+    if (operator !== undefined) {
+      step('operator', operator, operator)
+      continue
+    }
+
+    if (closer !== '' && char === opener) {
+      depth += 1
+    } else if (closer !== '' && char === closer) {
+      depth -= 1
+    }
+
+    step('{}()[];,.#'.includes(char) ? 'punctuation' : 'plain', char, char)
+  }
+
+  return { position, state: '' }
+}
+
+function cFamilyLine(family: CFamily, line: string, entering: string): Lexed {
+  const output = createCollector()
+  const lexer: CLexer = { family, line, output, indent: line.length - line.trimStart().length, nesting: 0 }
+  let position = 0
+
+  if (entering.startsWith(IN_BLOCK_COMMENT)) {
+    const comment = blockComment(lexer, 0, entering.length)
+
+    if (comment.position < 0) {
+      return { spans: output.spans, state: IN_BLOCK_COMMENT.repeat(comment.depth) }
+    }
+
+    position = comment.position
+  } else if (entering.startsWith('s')) {
+    const end = cFamilyString(lexer, 0, decodeString(entering))
+
+    if (end < 0) {
+      return { spans: output.spans, state: entering }
+    }
+
+    position = end
+  }
+
+  return { spans: output.spans, state: cFamilyCode(lexer, position, '').state }
 }
